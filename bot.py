@@ -31,10 +31,10 @@ logger = logging.getLogger(__name__)
 
 # ─── Configuration ───
 BOT_TOKEN = "8776175904:AAENUQonxmjNmJlgaIqaPDs2jtBW7lwJ-zI"
-ADMIN_PASSWORD = "mahmud232458"
+ADMIN_PASSWORD = "Mohammed23245"
 
 MAIN_CHANNEL     = "@earnwithasif17"
-MAIN_CHANNEL_URL = "https://t.me/earnwithasif17"
+MAIN_CHANNEL_URL = "https://t.me/asifuchiha7"
 MAIN_CHANNEL_ID  = -1003542994936
 CHAT_GROUP       = "https://t.me/asifuchiha7"
 CHAT_GROUP_ID    = -1003824201793
@@ -508,31 +508,47 @@ def extract_phone_from_text(text: str):
     return m.group(1) if m else None
 
 def find_matching_active_number(text: str):
+    # ── Strategy 1: Full number direct match ──
     for num in list(active_numbers.keys()):
         if num in text:
             return num
+
+    # ── Strategy 2: SPYX mask — "4917SPYX5576" (masdar OTP bot format) ──
+    spyx_patterns = re.findall(r'(\d{3,})[A-Za-z]{2,8}(\d{2,})', text)
+    for prefix, suffix in spyx_patterns:
+        for num in list(active_numbers.keys()):
+            if num.startswith(prefix) and num.endswith(suffix):
+                return num
+
+    # ── Strategy 3: *** mask — "7921***3002" ──
     masked_patterns = re.findall(r'(\d{3,})\*+(\d{2,})', text)
-    if masked_patterns:
-        for prefix, suffix in masked_patterns:
-            for num in list(active_numbers.keys()):
-                if num.startswith(prefix) and num.endswith(suffix):
-                    return num
+    for prefix, suffix in masked_patterns:
+        for num in list(active_numbers.keys()):
+            if num.startswith(prefix) and num.endswith(suffix):
+                return num
+
+    # ── Strategy 4: Number field prefix match ──
     num_field = re.search(r'[Nn]umber[:\s]+(\d{4,})', text)
     if num_field:
         prefix = num_field.group(1)
         for num in list(active_numbers.keys()):
             if num.startswith(prefix):
                 return num
+
+    # ── Strategy 5: Last 8/6 digits fallback ──
     for num in list(active_numbers.keys()):
         if num[-8:] in text:
             return num
     for num in list(active_numbers.keys()):
         if num[-6:] in text:
             return num
+
+    # ── Strategy 6: Last 4 digits with any mask ──
     for num in list(active_numbers.keys()):
         suffix4 = num[-4:]
-        if re.search(r'\*+' + re.escape(suffix4) + r'\b', text):
+        if re.search(r'[A-Za-z\*]+' + re.escape(suffix4) + r'\b', text):
             return num
+
     return None
 
 def extract_otp(text: str):
@@ -559,22 +575,33 @@ async def http_otp_handler(request: aio_web.Request) -> aio_web.Response:
     global _tg_app
     try:
         data      = await request.json()
-        number    = re.sub(r"\D", "", str(data.get("number", "")))
-        otp_code  = str(data.get("otp", "")).strip()
+        number    = re.sub(r"\D", "", str(data.get("number", ""))).lstrip("0")
+        otp_code  = str(data.get("otp", "")).strip().replace("-", "").replace(" ", "")
         service   = str(data.get("service", "other")).lower().strip()
 
         if not number:
             return aio_web.json_response({"ok": False, "error": "number required"}, status=400)
 
-        if number not in active_numbers:
+        # active_numbers এ match খোঁজো — leading zeros ছাড়া
+        matched_number = None
+        if number in active_numbers:
+            matched_number = number
+        else:
+            # OTP bot ভিন্ন format এ পাঠাতে পারে, তাই suffix match করো
+            for n in active_numbers:
+                if n.endswith(number[-8:]) or number.endswith(n[-8:]):
+                    matched_number = n
+                    break
+
+        if not matched_number:
             logger.warning(f"⚠️ HTTP /otp: number {number} not in active_numbers")
             return aio_web.json_response({"ok": False, "error": "number not active"}, status=404)
 
-        an_data = active_numbers[number]
+        an_data = active_numbers[matched_number]
         uid     = an_data["userId"]
         cc      = an_data.get("countryCode", "")
 
-        otp_key = f"http_{otp_code}_{number}"
+        otp_key = f"http_{otp_code}_{matched_number}"
         if an_data.get("lastOTP") == otp_key:
             return aio_web.json_response({"ok": True, "info": "duplicate"})
         an_data["lastOTP"]  = otp_key
@@ -590,7 +617,7 @@ async def http_otp_handler(request: aio_web.Request) -> aio_web.Response:
             f"📨 *OTP Received!*\n\n"
             f"{svc['icon']} *Service:* {svc['name']}\n"
             f"{country['flag']} *Country:* {country['name']}\n"
-            f"📞 *Number:* `+{number}`\n"
+            f"📞 *Number:* `+{matched_number}`\n"
         )
         if otp_code:
             notify += f"\n🔑 *OTP Code:* `{otp_code}`\n"
@@ -603,7 +630,7 @@ async def http_otp_handler(request: aio_web.Request) -> aio_web.Response:
                 logger.error(f"HTTP OTP notify send error: {e}")
 
         otp_log.append({
-            "phoneNumber": number, "userId": uid, "countryCode": cc,
+            "phoneNumber": matched_number, "userId": uid, "countryCode": cc,
             "service": service, "otpCode": otp_code, "earned": earned,
             "messageId": None, "delivered": True,
             "source": "http_api",
@@ -611,7 +638,7 @@ async def http_otp_handler(request: aio_web.Request) -> aio_web.Response:
         })
         save_otp_log()
 
-        logger.info(f"✅ HTTP /otp processed: +{number} otp={otp_code} uid={uid}")
+        logger.info(f"✅ HTTP /otp processed: +{matched_number} otp={otp_code} uid={uid}")
         return aio_web.json_response({"ok": True, "earned": earned, "balance": balance})
 
     except Exception as e:
@@ -919,6 +946,7 @@ def admin_keyboard():
          InlineKeyboardButton("💸 Withdrawals", callback_data="admin_withdrawals", api_kwargs={"style": "danger"})],
         [InlineKeyboardButton("👛 Balance Management", callback_data="admin_balance_manage", api_kwargs={"style": "primary"}),
          InlineKeyboardButton("👥 Referral Stats", callback_data="admin_referral_stats", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("📡 OTP Panels", callback_data="admin_panels", api_kwargs={"style": "danger"})],
         [InlineKeyboardButton("🚪 Logout", callback_data="admin_logout", api_kwargs={"style": "danger"})],
     ])
 
@@ -2826,6 +2854,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid number. Example: `10`", parse_mode="Markdown")
         return
 
+    if state == "admin_add_panel" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        parts = text.strip().split()
+        if len(parts) != 3:
+            return await update.message.reply_text("❌ Format ভুল!\n`[URL] [username] [password]`", parse_mode="Markdown")
+        url, username, password = parts
+        panels = load_panels()
+        panels.append({"url": url, "username": username, "password": password})
+        save_panels(panels)
+        idx = len(panels) - 1
+        otp_panel_tasks[idx] = asyncio.create_task(run_panel(panels[idx], idx, context.application))
+        await update.message.reply_text(
+            f"✅ *Panel Added & Started!*\n\n🔗 `{url}`\n👤 `{username}`",
+            parse_mode="Markdown"
+        )
+        return
+
     if state == "admin_broadcast" and (sess["is_admin"] or is_admin(uid)):
         sess["state"] = None
         sent = 0
@@ -3244,9 +3289,7 @@ async def scheduled_membership_check(app):
                                 pass
 
                     try:
-                        await app.bot.send_message(int(uid),
-                            "⛔ *Access Blocked!*\n\nYou left a required group.",
-                            parse_mode="Markdown", reply_markup=verify_keyboard())
+                        pass  # message পাঠানো বন্ধ
                     except:
                         pass
                 else:
@@ -3256,6 +3299,319 @@ async def scheduled_membership_check(app):
                 logger.error(f"Scheduled check error for {uid}: {e}")
         await async_save_users()
         logger.info(f"✅ [Scheduled] {blocked} users blocked.")
+
+# ═══════════════════════════════════════════════
+# ─── OTP Panel Scraping System ───
+# ═══════════════════════════════════════════════
+
+PANELS_FILE     = os.path.join(DATA_DIR, "panels.json")
+otp_panel_tasks   = {}   # { index: asyncio.Task }
+otp_panel_status  = {}   # { index: "running" | "stopped" | "error" }
+otp_seen_ids      = set()
+
+def load_panels() -> list:
+    return load_json(PANELS_FILE, [])
+
+def save_panels(panels: list):
+    save_json(PANELS_FILE, panels)
+
+def scraper_extract_otp(message: str):
+    if not message: return None
+    cleaned = re.sub(r'\b(19|20)\d{2}[-/]\d{2}[-/]\d{2}\b', '', message)
+    cleaned = re.sub(r'\b(19|20)\d{2}\b', '', cleaned)
+    for p in [
+        r'FB-(\d{5})', r'[Gg]-(\d{6})',
+        r'(?:otp|code|pin|verification|كود|رمز|কোড)[^\d]{0,15}(\d{4,8})',
+        r'(?:is|has|:)\s*(\d{4,8})\b',
+        r'(\d{3}[- ]\d{3})', r'\b(\d{6})\b', r'\b(\d{4,8})\b',
+    ]:
+        m = re.search(p, cleaned, re.IGNORECASE)
+        if m:
+            raw = m.group(1).replace(' ', '').replace('-', '')
+            if 4 <= len(raw) <= 8:
+                return raw
+    return None
+
+def scraper_detect_service(message: str, range_name: str = "") -> str:
+    combined = (message + " " + range_name).lower()
+    for svc, pat in {
+        'whatsapp': r'whatsapp|واتساب', 'telegram': r'telegram',
+        'facebook': r'facebook|fb\.com', 'instagram': r'instagram',
+        'google':   r'google|gmail',     'microsoft': r'microsoft|outlook',
+        'twitter':  r'twitter|x\.com',   'tiktok':    r'tiktok',
+        'snapchat': r'snapchat',
+    }.items():
+        if re.search(pat, combined, re.IGNORECASE):
+            return svc
+    return "other"
+
+async def panel_login(session, url: str, username: str, password: str) -> bool:
+    try:
+        from bs4 import BeautifulSoup as _BS
+        async with session.get(f"{url}/ints/login", ssl=False, timeout=15) as r:
+            soup = _BS(await r.text(), "html.parser")
+            capt = "5"
+            inp  = soup.find("input", {"name": "capt"})
+            if inp:
+                nums = re.findall(r'\d+', (inp.find_parent("div") or inp).get_text())
+                if len(nums) >= 2:
+                    capt = str(int(nums[0]) + int(nums[1]))
+
+        async with session.post(
+            f"{url}/ints/signin",
+            data={"username": username, "password": password, "capt": capt},
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Referer": f"{url}/ints/login", "Origin": url},
+            allow_redirects=True, ssl=False, timeout=15
+        ) as r:
+            if "login" not in str(r.url).lower():
+                logger.info(f"✅ Panel login OK: {url}")
+                return True
+            logger.error(f"❌ Panel login FAIL: {url}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Panel login error {url}: {e}")
+        return False
+
+async def panel_fetch_sms(session, url: str) -> list:
+    try:
+        now  = datetime.now()
+        s_dt = (now.replace(hour=0, minute=0, second=0)).strftime('%Y-%m-%d') + '%2000:00:00'
+        e_dt = now.strftime('%Y-%m-%d') + '%2023:59:59'
+        ts   = int(time.time() * 1000)
+        api  = (
+            f"{url}/ints/client/res/data_smscdr.php?"
+            f"fdate1={s_dt}&fdate2={e_dt}&frange=&fnum=&fcli=&fg=0&"
+            f"sEcho=1&iColumns=7&sColumns=%2C%2C%2C%2C%2C%2C&"
+            f"iDisplayStart=0&iDisplayLength=100&"
+            f"mDataProp_0=0&mDataProp_1=1&mDataProp_2=2&"
+            f"mDataProp_3=3&mDataProp_4=4&mDataProp_5=5&mDataProp_6=6&"
+            f"sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=desc&iSortingCols=1&_={ts}"
+        )
+        async with session.get(api, ssl=False, timeout=15,
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Referer": f"{url}/ints/client/SMSCDRStats"}) as r:
+            if r.status != 200:
+                return []
+            data = json.loads(await r.text())
+            result = []
+            for item in data.get("aaData", []):
+                if not isinstance(item, list) or len(item) < 5:
+                    continue
+                if isinstance(item[0], str) and item[0].startswith('0,0,0,0'):
+                    continue
+                otp = scraper_extract_otp(str(item[4]))
+                if otp:
+                    result.append({
+                        "timestamp": str(item[0]),
+                        "number":    re.sub(r"\D", "", str(item[2])),
+                        "range":     str(item[1]),
+                        "message":   str(item[4]),
+                        "otp":       otp,
+                    })
+            return result
+    except Exception as e:
+        logger.error(f"❌ fetch_sms error {url}: {e}")
+        return []
+
+async def run_panel(panel: dict, idx: int, app):
+    import aiohttp as _aio
+    url      = panel["url"].rstrip("/")
+    username = panel["username"]
+    password = panel["password"]
+    logger.info(f"🚀 Panel #{idx+1} started: {url}")
+    otp_panel_status[idx] = "running"
+
+    async with _aio.ClientSession(
+        headers={"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest"},
+        cookie_jar=_aio.CookieJar(unsafe=True)
+    ) as session:
+        last_login   = 0
+        fail_count   = 0
+        while True:
+            try:
+                # ── Login / Re-login ──
+                if time.time() - last_login > 540:
+                    ok = await panel_login(session, url, username, password)
+                    if not ok:
+                        fail_count += 1
+                        if fail_count >= 3:
+                            otp_panel_status[idx] = "error"
+                            logger.error(f"❌ Panel #{idx+1} login failed 3 times, stopping.")
+                            return
+                        await asyncio.sleep(60)
+                        continue
+                    last_login = time.time()
+                    fail_count = 0
+                    otp_panel_status[idx] = "running"
+
+                # ── SMS Fetch ──
+                sms_list = await panel_fetch_sms(session, url)
+
+                for sms in sms_list:
+                    otp_id = f"{sms['number']}_{sms['otp']}_{sms['timestamp']}"
+                    if otp_id in otp_seen_ids:
+                        continue
+                    otp_seen_ids.add(otp_id)
+
+                    # ── Active number match ──
+                    number  = sms["number"]
+                    matched = None
+
+                    if number in active_numbers:
+                        matched = number
+                    else:
+                        # suffix match
+                        for n in list(active_numbers.keys()):
+                            if len(number) >= 6 and n.endswith(number[-6:]):
+                                matched = n
+                                break
+                            if len(number) >= 8 and number.endswith(n[-8:]):
+                                matched = n
+                                break
+
+                    if not matched:
+                        continue  # কোনো user এর number না
+
+                    an   = active_numbers[matched]
+                    uid  = an["userId"]
+                    cc   = an.get("countryCode", "")
+                    svc_id = scraper_detect_service(sms["message"], sms["range"])
+
+                    # Duplicate OTP check
+                    otp_key = f"panel_{sms['otp']}_{matched}"
+                    if an.get("lastOTP") == otp_key:
+                        continue
+                    an["lastOTP"]  = otp_key
+                    an["otpCount"] = an.get("otpCount", 0) + 1
+                    save_active()
+
+                    earned  = await add_earning(uid, cc)
+                    balance = get_user_earnings(uid)["balance"]
+                    svc     = services.get(svc_id, {"icon": "📱", "name": svc_id.capitalize()})
+                    country = countries.get(cc, {"flag": "🌍", "name": cc})
+
+                    notify = (
+                        f"📨 *OTP Received!*\n\n"
+                        f"{svc['icon']} *Service:* {svc['name']}\n"
+                        f"{country['flag']} *Country:* {country['name']}\n"
+                        f"📞 *Number:* `+{matched}`\n"
+                        f"\n🔑 *OTP Code:* `{sms['otp']}`\n"
+                        f"\n💵 *+{earned:.2f} taka earned!*\n"
+                        f"💰 *Balance: {balance:.2f} taka*"
+                    )
+
+                    try:
+                        await app.bot.send_message(int(uid), notify, parse_mode="Markdown")
+                        logger.info(f"✅ OTP sent: +{matched} → uid={uid} otp={sms['otp']}")
+                    except Exception as e:
+                        logger.error(f"❌ notify error uid={uid}: {e}")
+
+                    otp_log.append({
+                        "phoneNumber": matched, "userId": uid, "countryCode": cc,
+                        "service": svc_id, "otpCode": sms["otp"], "earned": earned,
+                        "messageId": None, "delivered": True,
+                        "source": f"panel_{url}",
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    await async_save_otp_log()
+
+                await asyncio.sleep(2)
+
+            except asyncio.CancelledError:
+                otp_panel_status[idx] = "stopped"
+                logger.info(f"⏹️ Panel #{idx+1} stopped")
+                return
+            except Exception as e:
+                otp_panel_status[idx] = "error"
+                logger.error(f"❌ Panel #{idx+1} error: {e}")
+                await asyncio.sleep(30)
+
+def start_all_panels(app):
+    panels = load_panels()
+    for i, p in enumerate(panels):
+        if i not in otp_panel_tasks or otp_panel_tasks[i].done():
+            otp_panel_tasks[i] = asyncio.create_task(run_panel(p, i, app))
+    logger.info(f"📡 {len(panels)} panel(s) started")
+
+# ── Admin Panel Callbacks ──
+async def cb_admin_panels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid   = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("❌ Admin only")
+    await query.answer()
+    panels = load_panels()
+    msg = f"📡 *OTP Panels*\n\nTotal: *{len(panels)}*\n\n"
+    for i, p in enumerate(panels):
+        status = otp_panel_status.get(i, "stopped")
+        if status == "running":
+            icon = "🟢 Running"
+        elif status == "error":
+            icon = "🔴 Login Failed"
+        else:
+            icon = "⚫ Stopped"
+        msg += f"*{i+1}.* `{p['url']}`\n👤 `{p['username']}` | {icon}\n\n"
+
+    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Panel", callback_data="panel_add", api_kwargs={"style": "primary"}),
+         InlineKeyboardButton("🗑️ Delete Panel", callback_data="panel_del", api_kwargs={"style": "danger"})],
+        [InlineKeyboardButton("🔄 Restart All", callback_data="panel_restart", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
+    ]))
+
+async def cb_panel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid   = str(update.effective_user.id)
+    await query.answer()
+    get_session(uid)["state"] = "admin_add_panel"
+    await query.edit_message_text(
+        "➕ *Add OTP Panel*\n\n"
+        "Format: `[URL] [username] [password]`\n\n"
+        "Example:\n`http://139.99.69.196 admin admin123`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Cancel", callback_data="admin_panels", api_kwargs={"style": "danger"})
+        ]])
+    )
+
+async def cb_panel_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    await query.answer()
+    panels = load_panels()
+    if not panels:
+        return await query.edit_message_text("❌ কোনো panel নেই।",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_panels")]]))
+    buttons = [[InlineKeyboardButton(f"🗑️ {i+1}. {p['url']}", callback_data=f"panel_del_confirm:{i}")]
+               for i, p in enumerate(panels)]
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panels", api_kwargs={"style": "primary"})])
+    await query.edit_message_text("🗑️ *কোন panel delete করবে?*", parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons))
+
+async def cb_panel_del_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    idx    = int(query.data.split(":")[1])
+    panels = load_panels()
+    if 0 <= idx < len(panels):
+        removed = panels.pop(idx)
+        save_panels(panels)
+        if idx in otp_panel_tasks and not otp_panel_tasks[idx].done():
+            otp_panel_tasks[idx].cancel()
+            otp_panel_tasks.pop(idx, None)
+        await query.edit_message_text(f"✅ *Deleted:* `{removed['url']}`", parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_panels")]]))
+
+async def cb_panel_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("🔄 Restarting...")
+    for task in otp_panel_tasks.values():
+        if not task.done():
+            task.cancel()
+    otp_panel_tasks.clear()
+    start_all_panels(context.application)
+    await query.edit_message_text("✅ *All panels restarted!*", parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_panels")]]))
 
 # ─── Main ───
 def main():
@@ -3342,6 +3698,12 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_admin_cancel, pattern="^admin_cancel$"))
     app.add_handler(CallbackQueryHandler(cb_admin_logout, pattern="^admin_logout$"))
 
+    app.add_handler(CallbackQueryHandler(cb_admin_panels, pattern="^admin_panels$"))
+    app.add_handler(CallbackQueryHandler(cb_panel_add, pattern="^panel_add$"))
+    app.add_handler(CallbackQueryHandler(cb_panel_del, pattern="^panel_del$"))
+    app.add_handler(CallbackQueryHandler(cb_panel_del_confirm, pattern="^panel_del_confirm:"))
+    app.add_handler(CallbackQueryHandler(cb_panel_restart, pattern="^panel_restart$"))
+
     app.add_handler(MessageHandler(filters.Chat(OTP_GROUP_ID) & ~filters.COMMAND, handle_otp_group_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
 
@@ -3355,6 +3717,7 @@ def main():
         asyncio.create_task(scheduled_membership_check(application))
         asyncio.create_task(green_api_monitor(application))
         await start_http_server()
+        start_all_panels(application)  # ── OTP Panels শুরু করো ──
 
     app.post_init = post_init
 
