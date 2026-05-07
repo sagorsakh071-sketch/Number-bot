@@ -38,7 +38,7 @@ MAIN_CHANNEL_URL = "https://t.me/QuickEarnOfficial_360"
 MAIN_CHANNEL_ID  = -1003209705212
 CHAT_GROUP       = "https://t.me/NumberChannel360"
 CHAT_GROUP_ID    = -1003892049243
-OTP_GROUP        = "্https://t.me/fibsms"
+OTP_GROUP        = "https://t.me/fibsms"
 OTP_GROUP_ID     = -1003822346481
 
 # ─── Baileys API (WhatsApp) ───
@@ -1993,9 +1993,9 @@ async def cb_totp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Support ───
 async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💬 *Support*\n\nContact admin:\n📌 @Rizoobaloch7766",
+        "💬 *Support*\n\nContact admin:\n📌 @Asif_store_bot",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Contact", url="https://t.me/Rizoobaloch7766", api_kwargs={"style": "danger"})]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Contact", url="https://t.me/Asif_store_bot", api_kwargs={"style": "danger"})]])
     )
 
 # ─── Admin Callbacks ───
