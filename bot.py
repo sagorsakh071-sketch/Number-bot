@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ───
-BOT_TOKEN = "8617390261:AAGQqKSjjcRadTX_h9Hwh6hXEjaHPtxPrvo"
+BOT_TOKEN = "8799946444:AAFHD1iPz6QhIAQB__HCCn6STMy41J4WFvw"
 ADMIN_PASSWORD = "sadhin78790"
 
 MAIN_CHANNEL     = "@QuickEarnOfficial_360"
