@@ -30,16 +30,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ───
-BOT_TOKEN = "8776175904:AAENUQonxmjNmJlgaIqaPDs2jtBW7lwJ-zI"
-ADMIN_PASSWORD = "Mohammed23245"
+BOT_TOKEN = "79072178:AAGWhPi2IwX7"
+ADMIN_PASSWORD = "rizo23245"
 
-MAIN_CHANNEL     = "@earnwithasif17"
-MAIN_CHANNEL_URL = "https://t.me/asifuchiha7"
-MAIN_CHANNEL_ID  = -1003542994936
-CHAT_GROUP       = "https://t.me/asifuchiha7"
-CHAT_GROUP_ID    = -1003824201793
-OTP_GROUP        = "https://t.me/uchiha_otp"
-OTP_GROUP_ID     = -1003988057295
+MAIN_CHANNEL     = "@earning_hub_official_channel"
+MAIN_CHANNEL_URL = "https://t.me/earning_hub_official_channel"
+MAIN_CHANNEL_ID  = -1003543718769
+CHAT_GROUP       = "https://t.me/earning_hub_number_channel"
+CHAT_GROUP_ID    = -1003875142184
+OTP_GROUP        = "https://t.me/EarningHub_otp"
+OTP_GROUP_ID     = -1003247504066
 
 # ─── Baileys API (WhatsApp) ───
 BAILEYS_URL = os.environ.get("BAILEYS_URL", "http://localhost:3000")
@@ -500,6 +500,7 @@ async def get_multiple_numbers(cc: str, svc: str, uid: str, count: int) -> list:
             "assignedAt": now, "lastOTP": None, "otpCount": 0
         }
     await async_save_numbers()
+    save_active()  # sync save — সাথে সাথে file এ লেখে
     await async_save_active()
     return nums
 
@@ -3454,24 +3455,37 @@ async def run_panel(panel: dict, idx: int, app):
                         continue
                     otp_seen_ids.add(otp_id)
 
+                    # ── active_numbers file থেকে fresh reload ──
+                    fresh_active = load_json(ACTIVE_NUMBERS_FILE, {})
+                    if fresh_active:
+                        active_numbers.update(fresh_active)
+
                     # ── Active number match ──
-                    number  = sms["number"]
+                    number  = sms["number"].lstrip("0")
                     matched = None
 
+                    logger.info(f"🔍 Panel SMS: number={number} otp={sms['otp']} active_count={len(active_numbers)}")
+
+                    # Direct match
                     if number in active_numbers:
                         matched = number
                     else:
-                        # suffix match
                         for n in list(active_numbers.keys()):
-                            if len(number) >= 6 and n.endswith(number[-6:]):
-                                matched = n
-                                break
-                            if len(number) >= 8 and number.endswith(n[-8:]):
-                                matched = n
-                                break
+                            n_clean   = n.lstrip("0")
+                            num_clean = number.lstrip("0")
+                            if n_clean == num_clean:
+                                matched = n; break
+                            if len(num_clean) >= 8 and n_clean.endswith(num_clean[-8:]):
+                                matched = n; break
+                            if len(num_clean) >= 8 and num_clean.endswith(n_clean[-8:]):
+                                matched = n; break
+                            if len(num_clean) >= 6 and n_clean.endswith(num_clean[-6:]):
+                                matched = n; break
 
                     if not matched:
-                        continue  # কোনো user এর number না
+                        logger.info(f"⚠️ Panel: no active number matched for {number}")
+                        logger.info(f"⚠️ Active numbers: {list(active_numbers.keys())[:5]}")
+                        continue
 
                     an   = active_numbers[matched]
                     uid  = an["userId"]
