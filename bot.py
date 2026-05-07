@@ -33,11 +33,11 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "79072178:AAGWhPi2IwX7"
 ADMIN_PASSWORD = "rizo23245"
 
-MAIN_CHANNEL     = "@earning_hub_official_channel"
-MAIN_CHANNEL_URL = "https://t.me/earning_hub_official_channel"
-MAIN_CHANNEL_ID  = -1003543718769
-CHAT_GROUP       = "https://t.me/earning_hub_number_channel"
-CHAT_GROUP_ID    = -1003875142184
+MAIN_CHANNEL     = "@QuickEarnOfficial_360"
+MAIN_CHANNEL_URL = "https://t.me/QuickEarnOfficial_360"
+MAIN_CHANNEL_ID  = -1003209705212
+CHAT_GROUP       = "https://t.me/NumberChannel360"
+CHAT_GROUP_ID    = -1003892049243
 OTP_GROUP        = "https://t.me/EarningHub_otp"
 OTP_GROUP_ID     = -1003247504066
 
