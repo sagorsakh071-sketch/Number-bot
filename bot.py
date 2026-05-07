@@ -30,16 +30,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ───
-BOT_TOKEN = "79072178:AAGWhPi2IwX7"
-ADMIN_PASSWORD = "rizo23245"
+BOT_TOKEN = "8617390261:AAGQqKSjjcRadTX_h9Hwh6hXEjaHPtxPrvo"
+ADMIN_PASSWORD = "sadhin78790"
 
 MAIN_CHANNEL     = "@QuickEarnOfficial_360"
 MAIN_CHANNEL_URL = "https://t.me/QuickEarnOfficial_360"
 MAIN_CHANNEL_ID  = -1003209705212
 CHAT_GROUP       = "https://t.me/NumberChannel360"
 CHAT_GROUP_ID    = -1003892049243
-OTP_GROUP        = "https://t.me/EarningHub_otp"
-OTP_GROUP_ID     = -1003247504066
+OTP_GROUP        = "্https://t.me/fibsms"
+OTP_GROUP_ID     = -1003822346481
 
 # ─── Baileys API (WhatsApp) ───
 BAILEYS_URL = os.environ.get("BAILEYS_URL", "http://localhost:3000")
