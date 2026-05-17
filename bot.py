@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "798:AAGWhPi2IwX714eL2-zmS3cGXJH8"
 ADMIN_PASSWORD = "sadhin232134"
 
-MAIN_CHANNEL     = "@earning_hub_official_channel"
-MAIN_CHANNEL_URL = "https://t.me/earning_hub_official_channel"
+MAIN_CHANNEL     = "@StarIncomeLab"
+MAIN_CHANNEL_URL = "https://t.me/StarIncomeLab"
 MAIN_CHANNEL_ID  = -1003543718769
 CHAT_GROUP       = "https://t.me/earning_hub_number_channel"
 CHAT_GROUP_ID    = -1003875142184
