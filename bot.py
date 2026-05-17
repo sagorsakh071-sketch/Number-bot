@@ -30,8 +30,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ───
-BOT_TOKEN = "798:AAGWhPi2IwX714eL2-zmS3cGXJH8"
-ADMIN_PASSWORD = "sadhin232134"
+BOT_TOKEN = "8443561936:AAG5IrDJTxTCJkw9hLKTJKWuQ6QQ7yBRHQk"
+ADMIN_PASSWORD = "sadhin21267896"
 
 MAIN_CHANNEL     = "@StarIncomeLab"
 MAIN_CHANNEL_URL = "https://t.me/StarIncomeLab"
