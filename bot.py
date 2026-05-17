@@ -35,11 +35,11 @@ ADMIN_PASSWORD = "sadhin232134"
 
 MAIN_CHANNEL     = "@StarIncomeLab"
 MAIN_CHANNEL_URL = "https://t.me/StarIncomeLab"
-MAIN_CHANNEL_ID  = -1003543718769
-CHAT_GROUP       = "https://t.me/earning_hub_number_channel"
-CHAT_GROUP_ID    = -1003875142184
-OTP_GROUP        = "https://t.me/EarningHub_otp"
-OTP_GROUP_ID     = -1003247504066
+MAIN_CHANNEL_ID  = -1003117859554
+CHAT_GROUP       = "https://t.me/sternumbar"
+CHAT_GROUP_ID    = -1003997956140
+OTP_GROUP        = "https://t.me/+mfzHfIRnmTo0OWFl"
+OTP_GROUP_ID     = -1003513457570
 
 # ─── Baileys API (WhatsApp) ───
 BAILEYS_URL = os.environ.get("BAILEYS_URL", "http://localhost:3000")
