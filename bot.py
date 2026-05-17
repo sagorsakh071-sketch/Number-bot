@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pyotp
 from aiohttp import web as aio_web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, CopyTextButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
@@ -30,16 +30,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ───
-BOT_TOKEN = "87999:AAFHD1iPz6QhIAQB__H"
-ADMIN_PASSWORD = "sadhin78790"
+BOT_TOKEN = "798:AAGWhPi2IwX714eL2-zmS3cGXJH8"
+ADMIN_PASSWORD = "sadhin232134"
 
-MAIN_CHANNEL     = "@QuickEarnOfficial_360"
-MAIN_CHANNEL_URL = "https://t.me/QuickEarnOfficial_360"
-MAIN_CHANNEL_ID  = -1003209705212
-CHAT_GROUP       = "https://t.me/NumberChannel360"
-CHAT_GROUP_ID    = -1003892049243
-OTP_GROUP        = "https://t.me/fibsms"
-OTP_GROUP_ID     = -1003822346481
+MAIN_CHANNEL     = "@earning_hub_official_channel"
+MAIN_CHANNEL_URL = "https://t.me/earning_hub_official_channel"
+MAIN_CHANNEL_ID  = -1003543718769
+CHAT_GROUP       = "https://t.me/earning_hub_number_channel"
+CHAT_GROUP_ID    = -1003875142184
+OTP_GROUP        = "https://t.me/EarningHub_otp"
+OTP_GROUP_ID     = -1003247504066
 
 # ─── Baileys API (WhatsApp) ───
 BAILEYS_URL = os.environ.get("BAILEYS_URL", "http://localhost:3000")
@@ -110,6 +110,19 @@ withdrawals    = load_json(WITHDRAW_FILE, [])
 country_prices = load_json(COUNTRY_PRICES_FILE, {})
 referrals      = load_json(REFERRALS_FILE, {})
 wa_sessions    = {}
+
+# ─── Global WhatsApp System ───
+# admin একটা WA connect করলে সব user এর number check হবে
+GLOBAL_WA_FILE    = os.path.join(DATA_DIR, "global_wa.json")
+global_wa_data    = load_json(GLOBAL_WA_FILE, {
+    "enabled":   False,   # Global WA check on/off
+    "connected": False,   # Admin WA connected কিনা
+    "phone":     "",      # Admin WA phone
+    "uid":       "",      # Admin WA session uid
+})
+
+def save_global_wa():
+    save_json(GLOBAL_WA_FILE, global_wa_data)
 _tg_app        = None
 
 countries = load_json(COUNTRIES_FILE, {
@@ -392,7 +405,9 @@ async def async_save_referrals():
     await loop.run_in_executor(None, save_referrals)
 
 def save_users():       save_json(USERS_FILE, users)
-def save_active():      save_json(ACTIVE_NUMBERS_FILE, active_numbers)
+def save_active():
+    save_json(ACTIVE_NUMBERS_FILE, active_numbers)
+    rebuild_suffix_index()
 def save_otp_log():     save_json(OTP_LOG_FILE, otp_log[-1000:])
 def save_admins():      save_json(ADMINS_FILE, admins)
 def save_totp():        save_json(TOTP_SECRETS_FILE, totp_secrets)
@@ -508,7 +523,33 @@ def extract_phone_from_text(text: str):
     m = re.search(r"\+?(\d{10,15})", text)
     return m.group(1) if m else None
 
-def find_matching_active_number(text: str):
+# ─── Fast suffix index for active number matching ───
+_suffix_index: dict = {}  # { last_8_digits: number }
+
+def rebuild_suffix_index():
+    global _suffix_index
+    _suffix_index = {}
+    for n in active_numbers:
+        clean = n.lstrip("0")
+        for l in [8, 7, 6]:
+            if len(clean) >= l:
+                key = clean[-l:]
+                if key not in _suffix_index:
+                    _suffix_index[key] = n
+
+def find_active_number(panel_number: str):
+    """Panel এর number দিয়ে active_numbers এ fast match করো"""
+    clean = re.sub(r"\D", "", panel_number).lstrip("0")
+    # Direct match
+    if clean in active_numbers:
+        return clean
+    # Suffix match via index
+    for l in [8, 7, 6]:
+        if len(clean) >= l:
+            key = clean[-l:]
+            if key in _suffix_index:
+                return _suffix_index[key]
+    return None
     # ── Strategy 1: Full number direct match ──
     for num in list(active_numbers.keys()):
         if num in text:
@@ -698,8 +739,11 @@ async def green_get_state(uid: str = None) -> str:
         return "authorized"
     return "notAuthorized"
 
+
 async def green_api_monitor(app):
     logger.info("🟢 Baileys monitor started")
+    fail_counts = {}
+
     while True:
         await asyncio.sleep(30)
         try:
@@ -709,21 +753,104 @@ async def green_api_monitor(app):
                 try:
                     state = await green_get_state(uid)
                     if state != "authorized":
-                        wa_sessions.pop(uid, None)
-                        logger.warning(f"⚠️ Baileys: WhatsApp disconnected! uid={uid}")
-                        try:
-                            await app.bot.send_message(
-                                int(uid),
-                                "⚠️ *WhatsApp Disconnected!*\n\n"
-                                "তোমার WhatsApp থেকে bot disconnect হয়েছে।\n"
-                                "আবার connect করতে নিচের button চাপো।",
-                                parse_mode="Markdown",
-                                reply_markup=InlineKeyboardMarkup([[
-                                    InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect", api_kwargs={"style": "primary"})
-                                ]])
-                            )
-                        except Exception as e:
-                            logger.error(f"Disconnect notify error uid={uid}: {e}")
+                        fail_counts[uid] = fail_counts.get(uid, 0) + 1
+                        logger.warning(f"⚠️ Baileys: WA check fail #{fail_counts[uid]} uid={uid}")
+                        if fail_counts[uid] >= 5:
+                            fail_counts.pop(uid, None)
+                            wa_sessions.pop(uid, None)
+                            logger.warning(f"⚠️ Baileys: WhatsApp disconnected! uid={uid}")
+                            try:
+                                await app.bot.send_message(
+                                    int(uid),
+                                    "⚠️ *WhatsApp Disconnected!*\n\n"
+                                    "তোমার WhatsApp থেকে bot disconnect হয়েছে।\n"
+                                    "আবার connect করতে নিচের button চাপো।",
+                                    parse_mode="Markdown",
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect", api_kwargs={"style": "primary"})
+                                    ]])
+                                )
+                            except Exception as e:
+                                logger.error(f"Disconnect notify error uid={uid}: {e}")
+                    else:
+                        fail_counts.pop(uid, None)
+                except Exception as e:
+                    logger.error(f"Baileys monitor error uid={uid}: {e}")
+        except Exception as e:
+            logger.error(f"Baileys monitor loop error: {e}")
+
+async def send_otp_to_group(otp_code: str, group_msg: str, retries: int = 5):
+    """Direct HTTP দিয়ে OTP group এ পাঠাও — PTB rate limit এড়াতে"""
+    import aiohttp as _aiohttp
+    url     = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id":    OTP_GROUP_ID,
+        "text":       group_msg,
+        "parse_mode": "Markdown",
+        "reply_markup": {
+            "inline_keyboard": [
+                [{"text": str(otp_code), "copy_text": {"text": str(otp_code)}}],
+                [
+                    {"text": "☎️ Numbers", "url": "https://t.me/EARNING_HUB_NUMBER_BOT"},
+                    {"text": "💬 Chats",   "url": "https://t.me/earning_hub_otp_group"},
+                ]
+            ]
+        }
+    }
+    for attempt in range(1, retries + 1):
+        try:
+            async with _aiohttp.ClientSession() as s:
+                async with s.post(url, json=payload, timeout=15) as r:
+                    if r.status == 200:
+                        return True
+                    elif r.status == 429:
+                        data       = await r.json()
+                        retry_after = data.get("parameters", {}).get("retry_after", 10)
+                        logger.warning(f"⚠️ OTP Group Flood Wait {retry_after}s")
+                        await asyncio.sleep(retry_after + 1)
+                        continue
+                    else:
+                        logger.error(f"❌ OTP group send failed ({r.status})")
+                        return False
+        except Exception as e:
+            logger.error(f"❌ OTP group send error: {e}")
+            if attempt < retries:
+                await asyncio.sleep(3)
+    return False
+    logger.info("🟢 Baileys monitor started")
+    fail_counts = {}  # { uid: fail_count }
+
+    while True:
+        await asyncio.sleep(30)
+        try:
+            for uid in list(wa_sessions.keys()):
+                if not wa_sessions.get(uid, {}).get("connected"):
+                    continue
+                try:
+                    state = await green_get_state(uid)
+                    if state != "authorized":
+                        fail_counts[uid] = fail_counts.get(uid, 0) + 1
+                        logger.warning(f"⚠️ Baileys: WA check fail #{fail_counts[uid]} uid={uid}")
+                        # ৫ বার fail হলে disconnect বলবে
+                        if fail_counts[uid] >= 5:
+                            fail_counts.pop(uid, None)
+                            wa_sessions.pop(uid, None)
+                            logger.warning(f"⚠️ Baileys: WhatsApp disconnected! uid={uid}")
+                            try:
+                                await app.bot.send_message(
+                                    int(uid),
+                                    "⚠️ *WhatsApp Disconnected!*\n\n"
+                                    "তোমার WhatsApp থেকে bot disconnect হয়েছে।\n"
+                                    "আবার connect করতে নিচের button চাপো।",
+                                    parse_mode="Markdown",
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect", api_kwargs={"style": "primary"})
+                                    ]])
+                                )
+                            except Exception as e:
+                                logger.error(f"Disconnect notify error uid={uid}: {e}")
+                    else:
+                        fail_counts.pop(uid, None)
                 except Exception as e:
                     logger.error(f"Baileys monitor error uid={uid}: {e}")
         except Exception as e:
@@ -785,17 +912,22 @@ async def monitor_wa_connection(uid: str, context):
             logger.warning(f"monitor_wa_connection error: {e}")
 
 async def check_wa_number(phone: str, user_id: str):
-    if not wa_sessions.get(user_id, {}).get("connected"):
-        state = await green_get_state(user_id)
+    # ── Global WA enabled হলে admin WA দিয়ে check করো ──
+    effective_uid = user_id
+    if global_wa_data.get("enabled") and global_wa_data.get("connected"):
+        effective_uid = global_wa_data.get("uid", user_id)
+
+    if not wa_sessions.get(effective_uid, {}).get("connected"):
+        state = await green_get_state(effective_uid)
         if state != "authorized":
             return None
-        wa_sessions[user_id] = {"connected": True}
+        wa_sessions[effective_uid] = {"connected": True}
     digits = re.sub(r"\D", "", phone)
     loop   = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(
             None,
-            lambda: baileys_request("POST", "/check", {"numbers": [digits], "userId": user_id})
+            lambda: baileys_request("POST", "/check", {"numbers": [digits], "userId": effective_uid})
         )
         logger.info(f"📱 WA check +{digits}: {result}")
         results = result.get("results", {})
@@ -947,7 +1079,8 @@ def admin_keyboard():
          InlineKeyboardButton("💸 Withdrawals", callback_data="admin_withdrawals", api_kwargs={"style": "danger"})],
         [InlineKeyboardButton("👛 Balance Management", callback_data="admin_balance_manage", api_kwargs={"style": "primary"}),
          InlineKeyboardButton("👥 Referral Stats", callback_data="admin_referral_stats", api_kwargs={"style": "success"})],
-        [InlineKeyboardButton("📡 OTP Panels", callback_data="admin_panels", api_kwargs={"style": "danger"})],
+        [InlineKeyboardButton("📡 OTP Panels", callback_data="admin_panels", api_kwargs={"style": "danger"}),
+         InlineKeyboardButton("📱 Global WA", callback_data="admin_global_wa", api_kwargs={"style": "primary"})],
         [InlineKeyboardButton("🚪 Logout", callback_data="admin_logout", api_kwargs={"style": "danger"})],
     ])
 
@@ -1250,7 +1383,7 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     country = countries.get(cc, {"flag": "🌍", "name": cc})
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
-    wa_connected = wa_sessions.get(uid, {}).get("connected", False)
+    wa_connected = wa_sessions.get(uid, {}).get("connected", False) or (global_wa_data.get("enabled") and global_wa_data.get("connected"))
 
     def make_msg():
         return (
@@ -1338,7 +1471,7 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     country = countries.get(cc, {"flag": "🌍", "name": cc})
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
-    wa_connected = wa_sessions.get(uid, {}).get("connected", False)
+    wa_connected = wa_sessions.get(uid, {}).get("connected", False) or (global_wa_data.get("enabled") and global_wa_data.get("connected"))
 
     def make_msg_new():
         return (
@@ -1993,9 +2126,9 @@ async def cb_totp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Support ───
 async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💬 *Support*\n\nContact admin:\n📌 @Asif_store_bot",
+        "💬 *Support*\n\nContact admin:\n📌 @sadhin8miya",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Contact", url="https://t.me/Asif_store_bot", api_kwargs={"style": "danger"})]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Contact", url="https://t.me/sadhin8miya", api_kwargs={"style": "danger"})]])
     )
 
 # ─── Admin Callbacks ───
@@ -2720,6 +2853,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         async def wa_task():
             try:
+                # আগে check করো connected কিনা
+                current_state = await green_get_state(uid)
+                if current_state == "authorized":
+                    wa_sessions[uid] = {"connected": True}
+                    try: await loading.delete()
+                    except: pass
+                    await context.bot.send_message(
+                        uid,
+                        "✅ *WhatsApp Already Connected!*\n\n"
+                        "🟢 তোমার WhatsApp ইতিমধ্যে connected আছে।",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔴 Logout / Disconnect", callback_data="wa_disconnect", api_kwargs={"style": "danger"})],
+                            [InlineKeyboardButton("📊 Check Status", callback_data="wa_status", api_kwargs={"style": "primary"})],
+                        ])
+                    )
+                    return
+
                 code = await get_wa_pairing_code(phone, uid)
                 clean_code = re.sub(r"[^A-Z0-9]", "", code.upper())
                 formatted = (clean_code[:4] + "-" + clean_code[4:8]) if len(clean_code) >= 8 else code
@@ -2855,19 +3006,68 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid number. Example: `10`", parse_mode="Markdown")
         return
 
+    if state == "global_wa_phone" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        phone = re.sub(r"\D", "", text.strip())
+        if len(phone) < 8:
+            return await update.message.reply_text("❌ নম্বর ভুল!")
+        loading = await update.message.reply_text("⏳ Connecting Global WhatsApp...")
+        try:
+            code = await get_wa_pairing_code(phone, f"global_{uid}")
+            if not code:
+                await loading.delete()
+                return await update.message.reply_text("❌ Pairing code পাওয়া যায়নি।")
+            global_wa_data["phone"]     = phone
+            global_wa_data["uid"]       = f"global_{uid}"
+            global_wa_data["connected"] = False
+            save_global_wa()
+            await loading.delete()
+            await update.message.reply_text(
+                f"📱 *Global WhatsApp Pairing Code:*\n\n"
+                f"`{code}`\n\n"
+                f"WhatsApp → Linked Devices → Link a Device → Enter code",
+                parse_mode="Markdown"
+            )
+            # verify loop
+            async def verify_global_wa():
+                for _ in range(20):
+                    await asyncio.sleep(15)
+                    state_check = await green_get_state(f"global_{uid}")
+                    if state_check == "authorized":
+                        wa_sessions[f"global_{uid}"] = {"connected": True}
+                        global_wa_data["connected"] = True
+                        global_wa_data["enabled"]   = True
+                        save_global_wa()
+                        try:
+                            await context.bot.send_message(
+                                int(uid),
+                                "✅ *Global WhatsApp Connected!*\n\n"
+                                "এখন সব user এর number এই WA দিয়ে check হবে।",
+                                parse_mode="Markdown"
+                            )
+                        except: pass
+                        return
+            asyncio.create_task(verify_global_wa())
+        except Exception as e:
+            await loading.delete()
+            await update.message.reply_text(f"❌ Error: {e}")
+        return
+
     if state == "admin_add_panel" and (sess["is_admin"] or is_admin(uid)):
         sess["state"] = None
         parts = text.strip().split()
         if len(parts) != 3:
-            return await update.message.reply_text("❌ Format ভুল!\n`[URL] [username] [password]`", parse_mode="Markdown")
+            return await update.message.reply_text("❌ Format ভুল!\n`URL username password`", parse_mode="Markdown")
         url, username, password = parts
+        ptype  = sess.pop("panel_type", "masdar_client")
         panels = load_panels()
-        panels.append({"url": url, "username": username, "password": password})
+        panels.append({"url": url, "username": username, "password": password, "type": ptype})
         save_panels(panels)
         idx = len(panels) - 1
         otp_panel_tasks[idx] = asyncio.create_task(run_panel(panels[idx], idx, context.application))
+        label = PANEL_TYPE_LABEL.get(ptype, ptype)
         await update.message.reply_text(
-            f"✅ *Panel Added & Started!*\n\n🔗 `{url}`\n👤 `{username}`",
+            f"✅ *Panel Added & Started!*\n\n🔗 `{url}`\n👤 `{username}`\n🏷️ {label}",
             parse_mode="Markdown"
         )
         return
@@ -3347,9 +3547,20 @@ def scraper_detect_service(message: str, range_name: str = "") -> str:
     return "other"
 
 async def panel_login(session, url: str, username: str, password: str) -> bool:
+    """Auto-detect panel type and login"""
+    # ── Masdar panel (ints/login) ──
+    if await _masdar_login(session, url, username, password):
+        return True
+    # ── IMS panel (login) ──
+    if await _ims_login(session, url, username, password):
+        return True
+    return False
+
+async def _masdar_login(session, url: str, username: str, password: str) -> bool:
     try:
         from bs4 import BeautifulSoup as _BS
         async with session.get(f"{url}/ints/login", ssl=False, timeout=15) as r:
+            if r.status != 200: return False
             soup = _BS(await r.text(), "html.parser")
             capt = "5"
             inp  = soup.find("input", {"name": "capt"})
@@ -3366,18 +3577,103 @@ async def panel_login(session, url: str, username: str, password: str) -> bool:
             allow_redirects=True, ssl=False, timeout=15
         ) as r:
             if "login" not in str(r.url).lower():
-                logger.info(f"✅ Panel login OK: {url}")
+                logger.info(f"✅ Masdar login OK: {url}")
                 return True
-            logger.error(f"❌ Panel login FAIL: {url}")
             return False
     except Exception as e:
-        logger.error(f"❌ Panel login error {url}: {e}")
+        logger.debug(f"Masdar login failed {url}: {e}")
         return False
 
-async def panel_fetch_sms(session, url: str) -> list:
+async def _ims_login(session, url: str, username: str, password: str) -> bool:
+    try:
+        from bs4 import BeautifulSoup as _BS
+        login_url = f"{url}/login"
+        async with session.get(login_url, ssl=False, timeout=15) as r:
+            if r.status != 200: return False
+            text = await r.text()
+            soup = _BS(text, "html.parser")
+            # captcha
+            capt = "5"
+            math = re.search(r'(\d+)\s*([\+\-])\s*(\d+)', text)
+            if math:
+                a, op, b = int(math.group(1)), math.group(2), int(math.group(3))
+                capt = str(a + b) if op == '+' else str(a - b)
+            # etkk token
+            etkk_input = soup.find("input", {"name": "etkk"})
+            etkk_val   = etkk_input.get("value", "") if etkk_input else ""
+
+        async with session.post(
+            f"{url}/signin",
+            data={"etkk": etkk_val, "username": username, "password": password, "capt": capt},
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Referer": login_url},
+            allow_redirects=True, ssl=False, timeout=15
+        ) as r:
+            text = await r.text()
+            if username in text or "CDR" in text or "dashboard" in str(r.url).lower():
+                logger.info(f"✅ IMS login OK: {url}")
+                return True
+            return False
+    except Exception as e:
+        logger.debug(f"IMS login failed {url}: {e}")
+        return False
+
+async def panel_fetch_sms(session, url: str, panel_type: str = "masdar_client") -> list:
+    TYPE_MAP = {
+        "masdar_client": {"path": "/ints/client/res/data_smscdr.php",
+                          "ref":  "/ints/client/SMSCDRStats", "cols": 7, "idx": 4},
+        "masdar_agent":  {"path": "/ints/agent/res/data_smscdr.php",
+                          "ref":  "/ints/agent/SMSCDRStats",  "cols": 7, "idx": 4},
+        "ims_client":    {"path": "/client/res/data_smscdr.php",
+                          "ref":  "/client/SMSCDRStats",      "cols": 9, "idx": 5},
+        "ims_agent":     {"path": "/agent/res/data_smscdr.php",
+                          "ref":  "/agent/SMSCDRReports",     "cols": 9, "idx": 5},
+    }
+    cfg   = TYPE_MAP.get(panel_type, TYPE_MAP["masdar_client"])
+    today = datetime.now().strftime('%Y-%m-%d')
+    ts    = int(time.time() * 1000)
+    params = {
+        "fdate1": today + " 00:00:00",
+        "fdate2": today + " 23:59:59",
+        "frange": "", "fnum": "", "fcli": "", "fg": "0",
+        "sEcho": "1", "iColumns": str(cfg["cols"]),
+        "iDisplayStart": "0", "iDisplayLength": "100",
+        "sSearch": "", "bRegex": "false",
+        "iSortCol_0": "0", "sSortDir_0": "desc", "iSortingCols": "1",
+        "_": ts,
+    }
+    for i in range(cfg["cols"]):
+        params[f"mDataProp_{i}"] = str(i)
+    try:
+        async with session.get(
+            url + cfg["path"], params=params, ssl=False, timeout=15,
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Referer": url + cfg["ref"]}
+        ) as r:
+            if r.status != 200: return []
+            data   = json.loads(await r.text())
+            result = []
+            for item in data.get("aaData", []):
+                if not isinstance(item, list) or len(item) <= cfg["idx"]: continue
+                if isinstance(item[0], str) and item[0].startswith('0,0,0,0'): continue
+                otp = scraper_extract_otp(str(item[cfg["idx"]]))
+                if otp:
+                    result.append({
+                        "timestamp": str(item[0]),
+                        "number":    re.sub(r"\D", "", str(item[2])) if len(item) > 2 else "",
+                        "range":     str(item[1]) if len(item) > 1 else "",
+                        "message":   str(item[cfg["idx"]]),
+                        "otp":       otp,
+                    })
+            return result
+    except Exception as e:
+        logger.error(f"❌ fetch_sms error {url}: {e}")
+        return []
+
+async def _masdar_fetch(session, url: str):
     try:
         now  = datetime.now()
-        s_dt = (now.replace(hour=0, minute=0, second=0)).strftime('%Y-%m-%d') + '%2000:00:00'
+        s_dt = now.strftime('%Y-%m-%d') + '%2000:00:00'
         e_dt = now.strftime('%Y-%m-%d') + '%2023:59:59'
         ts   = int(time.time() * 1000)
         api  = (
@@ -3392,15 +3688,12 @@ async def panel_fetch_sms(session, url: str) -> list:
         async with session.get(api, ssl=False, timeout=15,
             headers={"X-Requested-With": "XMLHttpRequest",
                      "Referer": f"{url}/ints/client/SMSCDRStats"}) as r:
-            if r.status != 200:
-                return []
+            if r.status != 200: return None
             data = json.loads(await r.text())
             result = []
             for item in data.get("aaData", []):
-                if not isinstance(item, list) or len(item) < 5:
-                    continue
-                if isinstance(item[0], str) and item[0].startswith('0,0,0,0'):
-                    continue
+                if not isinstance(item, list) or len(item) < 5: continue
+                if isinstance(item[0], str) and item[0].startswith('0,0,0,0'): continue
                 otp = scraper_extract_otp(str(item[4]))
                 if otp:
                     result.append({
@@ -3411,9 +3704,47 @@ async def panel_fetch_sms(session, url: str) -> list:
                         "otp":       otp,
                     })
             return result
-    except Exception as e:
-        logger.error(f"❌ fetch_sms error {url}: {e}")
-        return []
+    except:
+        return None
+
+async def _ims_fetch(session, url: str):
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+        ts    = int(time.time() * 1000)
+        params = {
+            "fdate1": f"{today} 00:00:00",
+            "fdate2": f"{today} 23:59:59",
+            "frange": "", "fnum": "", "fcli": "", "fg": "0",
+            "sEcho": "1", "iColumns": "9",
+            "iDisplayStart": "0", "iDisplayLength": "100",
+            "mDataProp_0": "0", "mDataProp_1": "1", "mDataProp_2": "2",
+            "mDataProp_3": "3", "mDataProp_4": "4", "mDataProp_5": "5",
+            "mDataProp_6": "6", "mDataProp_7": "7", "mDataProp_8": "8",
+            "sSearch": "", "bRegex": "false",
+            "iSortCol_0": "0", "sSortDir_0": "desc", "iSortingCols": "1",
+            "_": ts
+        }
+        api = f"{url}/agent/res/data_smscdr.php"
+        async with session.get(api, params=params, ssl=False, timeout=15,
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Referer": f"{url}/agent/SMSCDRReports"}) as r:
+            if r.status != 200: return None
+            data = json.loads(await r.text())
+            result = []
+            for item in data.get("aaData", []):
+                if not isinstance(item, list) or len(item) < 6: continue
+                otp = scraper_extract_otp(str(item[5]))
+                if otp:
+                    result.append({
+                        "timestamp": str(item[0]),
+                        "number":    re.sub(r"\D", "", str(item[2])),
+                        "range":     str(item[1]),
+                        "message":   str(item[5]),
+                        "otp":       otp,
+                    })
+            return result
+    except:
+        return None
 
 async def run_panel(panel: dict, idx: int, app):
     import aiohttp as _aio
@@ -3427,8 +3758,9 @@ async def run_panel(panel: dict, idx: int, app):
         headers={"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest"},
         cookie_jar=_aio.CookieJar(unsafe=True)
     ) as session:
-        last_login   = 0
-        fail_count   = 0
+        last_login    = 0
+        fail_count    = 0
+        previous_otps = set()  # এই run এ যা পাঠিয়েছি
         while True:
             try:
                 # ── Login / Re-login ──
@@ -3447,58 +3779,33 @@ async def run_panel(panel: dict, idx: int, app):
                     otp_panel_status[idx] = "running"
 
                 # ── SMS Fetch ──
-                sms_list = await panel_fetch_sms(session, url)
+                sms_list = await panel_fetch_sms(session, url, panel.get("type", "masdar_client"))
 
                 for sms in sms_list:
                     otp_id = f"{sms['number']}_{sms['otp']}_{sms['timestamp']}"
-                    if otp_id in otp_seen_ids:
+                    if otp_id in previous_otps:
                         continue
-                    otp_seen_ids.add(otp_id)
+                    previous_otps.add(otp_id)
+                    # memory limit
+                    if len(previous_otps) > 50000:
+                        previous_otps = set(list(previous_otps)[-20000:])
 
-                    # ── active_numbers file থেকে fresh reload ──
+                    # ── active_numbers fresh reload ──
                     fresh_active = load_json(ACTIVE_NUMBERS_FILE, {})
-                    if fresh_active:
+                    if fresh_active and set(fresh_active.keys()) != set(active_numbers.keys()):
+                        active_numbers.clear()
                         active_numbers.update(fresh_active)
+                        rebuild_suffix_index()
 
-                    # ── Active number match ──
                     number  = sms["number"].lstrip("0")
-                    matched = None
-
-                    logger.info(f"🔍 Panel SMS: number={number} otp={sms['otp']} active_count={len(active_numbers)}")
-
-                    # Direct match
-                    if number in active_numbers:
-                        matched = number
-                    else:
-                        for n in list(active_numbers.keys()):
-                            n_clean   = n.lstrip("0")
-                            num_clean = number.lstrip("0")
-                            if n_clean == num_clean:
-                                matched = n; break
-                            if len(num_clean) >= 8 and n_clean.endswith(num_clean[-8:]):
-                                matched = n; break
-                            if len(num_clean) >= 8 and num_clean.endswith(n_clean[-8:]):
-                                matched = n; break
-                            if len(num_clean) >= 6 and n_clean.endswith(num_clean[-6:]):
-                                matched = n; break
+                    matched = find_active_number(number)
 
                     if not matched:
-                        logger.info(f"⚠️ Panel: no active number matched for {number}")
-                        logger.info(f"⚠️ Active numbers: {list(active_numbers.keys())[:5]}")
                         continue
-
                     an   = active_numbers[matched]
                     uid  = an["userId"]
                     cc   = an.get("countryCode", "")
                     svc_id = scraper_detect_service(sms["message"], sms["range"])
-
-                    # Duplicate OTP check
-                    otp_key = f"panel_{sms['otp']}_{matched}"
-                    if an.get("lastOTP") == otp_key:
-                        continue
-                    an["lastOTP"]  = otp_key
-                    an["otpCount"] = an.get("otpCount", 0) + 1
-                    save_active()
 
                     earned  = await add_earning(uid, cc)
                     balance = get_user_earnings(uid)["balance"]
@@ -3517,7 +3824,7 @@ async def run_panel(panel: dict, idx: int, app):
 
                     try:
                         await app.bot.send_message(int(uid), notify, parse_mode="Markdown")
-                        logger.info(f"✅ OTP sent: +{matched} → uid={uid} otp={sms['otp']}")
+                        logger.info(f"✅ OTP sent to user: +{matched} → uid={uid} otp={sms['otp']}")
                     except Exception as e:
                         logger.error(f"❌ notify error uid={uid}: {e}")
 
@@ -3529,8 +3836,9 @@ async def run_panel(panel: dict, idx: int, app):
                         "timestamp": datetime.now().isoformat()
                     })
                     await async_save_otp_log()
+                    await asyncio.sleep(0.3)  # Telegram rate limit এর জন্য ছোট delay
 
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
 
             except asyncio.CancelledError:
                 otp_panel_status[idx] = "stopped"
@@ -3542,6 +3850,7 @@ async def run_panel(panel: dict, idx: int, app):
                 await asyncio.sleep(30)
 
 def start_all_panels(app):
+    rebuild_suffix_index()  # startup এ index তৈরি করো
     panels = load_panels()
     for i, p in enumerate(panels):
         if i not in otp_panel_tasks or otp_panel_tasks[i].done():
@@ -3549,7 +3858,112 @@ def start_all_panels(app):
     logger.info(f"📡 {len(panels)} panel(s) started")
 
 # ── Admin Panel Callbacks ──
+PANEL_TYPE_LABEL = {
+    "masdar_client": "Masdar Client",
+    "masdar_agent":  "Masdar Agent",
+    "ims_client":    "IMS Client",
+    "ims_agent":     "IMS Agent",
+}
+
 async def cb_admin_panels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid   = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("❌ Admin only")
+    await query.answer()
+    panels = load_panels()
+    msg = f"📡 *OTP Panels*\n\nTotal: *{len(panels)}*\n\n"
+    for i, p in enumerate(panels):
+        status = otp_panel_status.get(i, "stopped")
+        if status == "running":   icon = "🟢 Running"
+        elif status == "error":   icon = "🔴 Login Failed"
+        else:                     icon = "⚫ Stopped"
+        label = PANEL_TYPE_LABEL.get(p.get('type', ''), p.get('type', ''))
+        msg += f"*{i+1}.* `{p['url']}`\n👤 `{p['username']}` | 🏷️ {label} | {icon}\n\n"
+    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Panel", callback_data="panel_add:auto", api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("🗑️ Delete Panel", callback_data="panel_del", api_kwargs={"style": "danger"}),
+         InlineKeyboardButton("🔄 Restart All",  callback_data="panel_restart", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
+    ]))
+
+async def cb_admin_global_wa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid   = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("❌ Admin only")
+    await query.answer()
+
+    connected = global_wa_data.get("connected", False)
+    enabled   = global_wa_data.get("enabled", False)
+    phone     = global_wa_data.get("phone", "N/A")
+
+    status_icon = "🟢" if connected else "🔴"
+    toggle_icon = "✅ ON" if enabled else "❌ OFF"
+
+    msg = (
+        f"📱 *Global WhatsApp System*\n\n"
+        f"*Status:* {status_icon} {'Connected' if connected else 'Disconnected'}\n"
+        f"*Phone:* `{phone}`\n"
+        f"*WA Check:* {toggle_icon}\n\n"
+        f"একটা WhatsApp connect করলে সব user এর number check হবে।"
+    )
+
+    buttons = []
+    if connected:
+        buttons.append([
+            InlineKeyboardButton(
+                f"{'🔴 Disable' if enabled else '🟢 Enable'} WA Check",
+                callback_data="global_wa_toggle",
+                api_kwargs={"style": "success" if not enabled else "danger"}
+            ),
+            InlineKeyboardButton("🔌 Disconnect", callback_data="global_wa_disconnect", api_kwargs={"style": "danger"})
+        ])
+    else:
+        buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="global_wa_connect", api_kwargs={"style": "primary"})])
+
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})])
+    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def cb_global_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid   = str(update.effective_user.id)
+    await query.answer()
+    get_session(uid)["state"] = "global_wa_phone"
+    await query.edit_message_text(
+        "📱 *Global WhatsApp Connect*\n\n"
+        "WhatsApp নম্বর দাও (country code সহ):\n"
+        "Example: `8801712345678`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Cancel", callback_data="admin_global_wa", api_kwargs={"style": "danger"})
+        ]])
+    )
+
+async def cb_global_wa_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    global_wa_data["enabled"] = not global_wa_data.get("enabled", False)
+    save_global_wa()
+    status = "✅ চালু" if global_wa_data["enabled"] else "❌ বন্ধ"
+    await query.answer(f"Global WA Check {status}", show_alert=True)
+    await cb_admin_global_wa(update, context)
+
+async def cb_global_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    wa_uid = global_wa_data.get("uid", "")
+    if wa_uid and wa_uid in wa_sessions:
+        wa_sessions.pop(wa_uid, None)
+    global_wa_data["connected"] = False
+    global_wa_data["phone"]     = ""
+    global_wa_data["enabled"]   = False
+    save_global_wa()
+    await query.answer("🔌 Global WA Disconnected", show_alert=True)
+    await cb_admin_global_wa(update, context)
+
+# ─── Global WA handle_text ───
+# (handle_text এ state "global_wa_phone" handle করা হবে)
     query = update.callback_query
     uid   = str(update.effective_user.id)
     if not get_session(uid)["is_admin"] and not is_admin(uid):
@@ -3565,12 +3979,13 @@ async def cb_admin_panels(update: Update, context: ContextTypes.DEFAULT_TYPE):
             icon = "🔴 Login Failed"
         else:
             icon = "⚫ Stopped"
-        msg += f"*{i+1}.* `{p['url']}`\n👤 `{p['username']}` | {icon}\n\n"
+        label = PANEL_TYPE_LABEL.get(p.get('type', ''), p.get('type', ''))
+        msg += f"*{i+1}.* `{p['url']}`\n👤 `{p['username']}` | 🏷️ {label} | {icon}\n\n"
 
     await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add Panel", callback_data="panel_add", api_kwargs={"style": "primary"}),
-         InlineKeyboardButton("🗑️ Delete Panel", callback_data="panel_del", api_kwargs={"style": "danger"})],
-        [InlineKeyboardButton("🔄 Restart All", callback_data="panel_restart", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("➕ Add Panel", callback_data="panel_add:auto", api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("🗑️ Delete Panel", callback_data="panel_del", api_kwargs={"style": "danger"}),
+         InlineKeyboardButton("🔄 Restart All",  callback_data="panel_restart", api_kwargs={"style": "success"})],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
     ]))
 
@@ -3578,11 +3993,14 @@ async def cb_panel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid   = str(update.effective_user.id)
     await query.answer()
-    get_session(uid)["state"] = "admin_add_panel"
+    ptype = query.data.split(":")[1] if ":" in query.data else "masdar_client"
+    get_session(uid)["state"]      = "admin_add_panel"
+    get_session(uid)["panel_type"] = ptype
+    label = PANEL_TYPE_LABEL.get(ptype, ptype)
     await query.edit_message_text(
-        "➕ *Add OTP Panel*\n\n"
-        "Format: `[URL] [username] [password]`\n\n"
-        "Example:\n`http://139.99.69.196 admin admin123`",
+        f"➕ *Add {label} Panel*\n\n"
+        f"Format: `URL username password`\n\n"
+        f"Example:\n`http://139.99.69.196 admin admin123`",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("❌ Cancel", callback_data="admin_panels", api_kwargs={"style": "danger"})
@@ -3712,8 +4130,12 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_admin_cancel, pattern="^admin_cancel$"))
     app.add_handler(CallbackQueryHandler(cb_admin_logout, pattern="^admin_logout$"))
 
+    app.add_handler(CallbackQueryHandler(cb_admin_global_wa, pattern="^admin_global_wa$"))
+    app.add_handler(CallbackQueryHandler(cb_global_wa_connect, pattern="^global_wa_connect$"))
+    app.add_handler(CallbackQueryHandler(cb_global_wa_toggle, pattern="^global_wa_toggle$"))
+    app.add_handler(CallbackQueryHandler(cb_global_wa_disconnect, pattern="^global_wa_disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_admin_panels, pattern="^admin_panels$"))
-    app.add_handler(CallbackQueryHandler(cb_panel_add, pattern="^panel_add$"))
+    app.add_handler(CallbackQueryHandler(cb_panel_add, pattern="^panel_add:"))
     app.add_handler(CallbackQueryHandler(cb_panel_del, pattern="^panel_del$"))
     app.add_handler(CallbackQueryHandler(cb_panel_del_confirm, pattern="^panel_del_confirm:"))
     app.add_handler(CallbackQueryHandler(cb_panel_restart, pattern="^panel_restart$"))
