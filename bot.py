@@ -2126,9 +2126,9 @@ async def cb_totp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Support ───
 async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💬 *Support*\n\nContact admin:\n📌 @rahulvai444",
+        "💬 *Support*\n\nContact admin:\n📌 @sadhin8miya",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Contact", url="https://t.me/rahulvai444", api_kwargs={"style": "danger"})]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Contact", url="https://t.me/sadhin8miya", api_kwargs={"style": "danger"})]])
     )
 
 # ─── Admin Callbacks ───
