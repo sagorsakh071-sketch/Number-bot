@@ -12,10 +12,10 @@ from telegram.ext import (
 )
 
 # ─── Configuration ───
-BOT_TOKEN  = "YOUR_BOT_TOKEN_HERE"
-OWNER_ID   = 123456789  # আপনার Telegram ID
+BOT_TOKEN   = "8609593081:AAGpOlcFHf51yhTMcroZHPy7u5Qrd6JwQvw"
+OWNER_ID    = 7095358778
 BAILEYS_URL = os.environ.get("BAILEYS_URL", "http://localhost:3000")
-WA_USER_ID  = "wa_checker"  # Baileys session ID
+WA_USER_ID  = "wa_checker"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -200,22 +200,58 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     doc = update.message.document
-    if not doc or not doc.file_name.endswith(".txt"):
-        return await update.message.reply_text("❌ শুধু `.txt` file পাঠান।")
+    if not doc:
+        return await update.message.reply_text("❌ File পাঠান।")
 
-    # ── File download ──
+    fname = doc.file_name.lower()
+    if not (fname.endswith(".txt") or fname.endswith(".xlsx") or fname.endswith(".xls")):
+        return await update.message.reply_text("❌ শুধু `.txt`, `.xlsx` বা `.xls` file পাঠান।")
+
     loading = await update.message.reply_text("⏳ File processing করছি...")
+
     try:
-        file = await context.bot.get_file(doc.file_id)
-        file_bytes = await file.download_as_bytearray()
-        content    = file_bytes.decode("utf-8", errors="ignore")
+        file      = await context.bot.get_file(doc.file_id)
+        tmp_path  = f"/tmp/{doc.file_id}_{doc.file_name}"
+        await file.download_to_drive(tmp_path)
+    except Exception as e:
+        await loading.delete()
+        return await update.message.reply_text(f"❌ File download error: {e}")
+
+    # ── Numbers extract ──
+    numbers = []
+    try:
+        if fname.endswith(".txt"):
+            with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            numbers = re.findall(r'\d{7,15}', content)
+
+        elif fname.endswith(".xlsx"):
+            from openpyxl import load_workbook
+            wb = load_workbook(tmp_path, read_only=True, data_only=True)
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows(values_only=True):
+                    for cell in row:
+                        if cell is not None:
+                            val = str(cell).strip()
+                            digits = re.sub(r"\D", "", val)
+                            if 7 <= len(digits) <= 15:
+                                numbers.append(digits)
+
+        elif fname.endswith(".xls"):
+            import pandas as pd
+            df = pd.read_excel(tmp_path, engine="xlrd", dtype=str, header=None)
+            for col in df.columns:
+                for val in df[col].dropna():
+                    digits = re.sub(r"\D", "", str(val))
+                    if 7 <= len(digits) <= 15:
+                        numbers.append(digits)
+
+        os.remove(tmp_path)
     except Exception as e:
         await loading.delete()
         return await update.message.reply_text(f"❌ File read error: {e}")
 
-    # ── Numbers extract ──
-    raw_numbers = re.findall(r'\d{7,15}', content)
-    numbers     = list(dict.fromkeys(raw_numbers))  # deduplicate
+    numbers = list(dict.fromkeys(numbers))  # deduplicate
 
     if not numbers:
         await loading.delete()
@@ -224,7 +260,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await loading.edit_text(
         f"✅ *{len(numbers)}* নম্বর পাওয়া গেছে।\n"
         f"⏳ WhatsApp check করছি...\n\n"
-        f"(প্রতি ৫০টায় ~১ সেকেন্ড)"
+        f"(প্রতি ৫০টায় ~১ সেকেন্ড)",
+        parse_mode="Markdown"
     )
 
     # ── WA Check ──
