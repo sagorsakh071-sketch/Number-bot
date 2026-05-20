@@ -37,8 +37,9 @@ def load_data() -> dict:
         return {
             "users": {},
             "banned": [],
+            "approved": [],
             "global_wa": {"enabled": True, "connected": False},
-            "settings": {"daily_limit": 0},
+            "settings": {"daily_limit": 0, "open_mode": True},
         }
 
 def save_data(d: dict):
@@ -71,6 +72,13 @@ def register_user(update: Update):
 
 def is_banned(uid) -> bool:
     return str(uid) in db.get("banned", [])
+
+def is_open_mode() -> bool:
+    return db.get("settings", {}).get("open_mode", True)
+
+def is_approved(uid) -> bool:
+    if is_open_mode(): return True
+    return str(uid) in db.get("approved", [])
 
 def global_wa_on() -> bool:
     return db.get("global_wa", {}).get("enabled", True)
@@ -359,6 +367,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_banned(uid):
         return await update.message.reply_text("🚫 You are banned from this bot.")
     register_user(update)
+    if not is_approved(uid) and uid != OWNER_ID:
+        return await update.message.reply_text(
+            "🔒 *This bot is in closed mode.*\n\n"
+            "Access এর জন্য admin এর সাথে যোগাযোগ করুন:\n"
+            f"{SUPPORT_USER}",
+            parse_mode="Markdown"
+        )
     wa_uid    = get_wa_uid(str(uid))
     connected = await wa_state(wa_uid)
     status    = "🟢 Connected" if connected else "🔴 Not Connected"
@@ -563,6 +578,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if is_banned(uid): return
     register_user(update)
+    if not is_approved(uid) and uid != OWNER_ID:
+        return await update.message.reply_text("🔒 Access denied. Contact admin.")
 
     doc = update.message.document
     if not doc: return
@@ -645,6 +662,8 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"📊 *Bot Statistics*\n\n"
             f"👥 Total Users: *{len(users)}*\n"
+            f"🔑 Mode: *{'🔓 Open' if is_open_mode() else '🔒 Closed'}*\n"
+            f"✅ Approved: *{len(db.get('approved', []))}*\n"
             f"🚫 Banned: *{len(banned)}*\n"
             f"🔢 Total Checks: *{total_checks}*\n"
             f"⚡ Daily Limit: *{'Unlimited' if limit == 0 else limit}*\n"
@@ -724,6 +743,39 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["state"] = "msg_user"
         await query.edit_message_text(
             "✉️ *Message User*\n\nFormat:\n`USER_ID\nMessage text`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
+        )
+
+    # ── Mode Toggle ──
+    elif data == "adm_mode_toggle":
+        current = db.get("settings", {}).get("open_mode", True)
+        db.setdefault("settings", {})["open_mode"] = not current
+        save_data(db)
+        mode = "🔓 Open (সবাই use করতে পারবে)" if not current else "🔒 Closed (শুধু approved)"
+        await query.answer(f"Mode: {mode}", show_alert=True)
+        await query.edit_message_text("⚙️ *Admin Panel*", parse_mode="Markdown", reply_markup=admin_menu())
+
+    # ── Approve ──
+    elif data == "adm_approve":
+        context.user_data["state"] = "approve_user"
+        mode = "🔓 Open" if is_open_mode() else "🔒 Closed"
+        approved_count = len(db.get("approved", []))
+        await query.edit_message_text(
+            f"✅ *Approve User*\n\n"
+            f"Current Mode: *{mode}*\n"
+            f"Approved Users: *{approved_count}*\n\n"
+            f"Approve করতে User ID দিন:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
+        )
+
+    elif data == "adm_unapprove":
+        context.user_data["state"] = "unapprove_user"
+        approved = db.get("approved", [])
+        text_list = "\n".join([f"• `{a}`" for a in approved[:20]]) or "কেউ নেই"
+        await query.edit_message_text(
+            f"❌ *Unapprove User*\n\nApproved list:\n{text_list}\n\nUnapprove করতে User ID দিন:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
         )
