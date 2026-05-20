@@ -889,7 +889,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_content = "\n".join(lines)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         await context.bot.send_document(
-            chat_id=uid,
+            chat_id=query.from_user.id,
             document=file_content.encode("utf-8"),
             filename=f"users_export_{ts}.txt",
             caption=f"📥 *User Export*\n\n👥 Total: *{len(users)}* users",
