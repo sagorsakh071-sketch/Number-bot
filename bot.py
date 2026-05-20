@@ -273,6 +273,7 @@ def admin_menu():
          InlineKeyboardButton("📊 Stats",        callback_data="adm_stats")],
         [InlineKeyboardButton("⚙️ Global Limit", callback_data="adm_limit"),
          InlineKeyboardButton("👤 User Limit",    callback_data="adm_user_limit")],
+        [InlineKeyboardButton("📥 Export Users", callback_data="adm_export")],
         [InlineKeyboardButton("🔙 Close",          callback_data="adm_close")],
     ])
 
