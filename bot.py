@@ -851,6 +851,51 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query.data = "adm_global_wa"
         await cb_handler(update, context)
 
+    elif data == "adm_export":
+        users  = db.get("users", {})
+        banned = db.get("banned", [])
+        approved = db.get("approved", [])
+        lines  = []
+        lines.append("=" * 60)
+        lines.append(f"WA CHECKER BOT - USER EXPORT")
+        lines.append(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Total Users: {len(users)}")
+        lines.append("=" * 60)
+        lines.append("")
+
+        for uid, u in sorted(users.items(), key=lambda x: x[1].get("checks_total", 0), reverse=True):
+            uname    = u.get("username", "")
+            name     = u.get("name", "N/A")
+            joined   = u.get("joined", "")[:10]
+            total    = u.get("checks_total", 0)
+            today    = u.get("checks_today", 0)
+            climit   = u.get("custom_limit", -1)
+            is_ban   = "🚫 BANNED" if uid in banned else ""
+            is_app   = "✅ APPROVED" if uid in approved else ""
+            limit_lbl = "Global" if climit == -1 else ("Unlimited" if climit == 0 else f"{climit}/day")
+
+            lines.append(f"👤 Name     : {name}")
+            lines.append(f"🆔 User ID  : {uid}")
+            lines.append(f"📛 Username : @{uname}" if uname else f"📛 Username : (not set)")
+            lines.append(f"📅 Joined   : {joined}")
+            lines.append(f"📊 Total    : {total} checks")
+            lines.append(f"📅 Today    : {today} checks")
+            lines.append(f"⚡ Limit    : {limit_lbl}")
+            if is_ban:  lines.append(f"Status     : {is_ban}")
+            if is_app:  lines.append(f"Status     : {is_app}")
+            lines.append("-" * 40)
+
+        file_content = "\n".join(lines)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        await context.bot.send_document(
+            chat_id=uid,
+            document=file_content.encode("utf-8"),
+            filename=f"users_export_{ts}.txt",
+            caption=f"📥 *User Export*\n\n👥 Total: *{len(users)}* users",
+            parse_mode="Markdown"
+        )
+        await query.answer("✅ File sent!", show_alert=True)
+
     elif data == "adm_back":
         await query.edit_message_text("⚙️ *Admin Panel*", parse_mode="Markdown", reply_markup=admin_menu())
 
