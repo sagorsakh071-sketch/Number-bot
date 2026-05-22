@@ -565,6 +565,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Admin state check ──
+    if sess.get("state"):
+        return
+
     # ── Number input (text) ──
     if sess.get("state") == "waiting_numbers" or re.search(r'\d{7,15}', text):
         sess.pop("state", None)
