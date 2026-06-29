@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 # ─── Configuration ───
-BOT_TOKEN      = "8609593081:AAFmYML-bbCyEcYaBLKEnn_dtiV4_N2b6lU"
+BOT_TOKEN      = "8609593081:AAEHnIV9qvtZWNRKpK-57zVZHgD7owKQQ4A"
 OWNER_ID       = 7095358778
 SUPPORT_USER   = "@sadhin8miya"
 BAILEYS_URL    = os.environ.get("BAILEYS_URL", "http://localhost:8080")
