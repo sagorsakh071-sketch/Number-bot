@@ -19,34 +19,19 @@ from pathlib import Path
 
 import pyotp
 from aiohttp import web as aio_web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, CopyTextButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, CopyTextButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
 )
-
-# ─── KeyboardButton Style Patch ───
-_old_kb_to_dict = KeyboardButton.to_dict
-def _new_kb_to_dict(self):
-    d = _old_kb_to_dict(self)
-    if hasattr(self, 'style'):
-        d['style'] = self.style
-    return d
-KeyboardButton.to_dict = _new_kb_to_dict
-
-def rbtn(text, style=None):
-    b = KeyboardButton(text=text)
-    if style:
-        b.style = style
-    return b
 
 # ─── Logging ───
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ───
-BOT_TOKEN = "7907217678:AAGJ5Ub0hxSGxVmEw8cy2zsRu5Rf48mPZ2Q"
-ADMIN_PASSWORD = "sadhin232kg134"
+BOT_TOKEN = "7907217678:AAGWhPi2IwX714eL2-zmS3cGXJHvDoH5do8"
+ADMIN_PASSWORD = "sadhin23254134"
 
 MAIN_CHANNEL     = "@earning_hub_official_channel"
 MAIN_CHANNEL_URL = "https://t.me/earning_hub_official_channel"
@@ -127,18 +112,18 @@ referrals      = load_json(REFERRALS_FILE, {})
 wa_sessions    = {}
 
 # ─── Global WhatsApp System ───
+# admin একটা WA connect করলে সব user এর number check হবে
 GLOBAL_WA_FILE    = os.path.join(DATA_DIR, "global_wa.json")
 global_wa_data    = load_json(GLOBAL_WA_FILE, {
-    "enabled":   False,
-    "connected": False,
-    "phone":     "",
-    "uid":       "",
+    "enabled":   False,   # Global WA check on/off
+    "connected": False,   # Admin WA connected কিনা
+    "phone":     "",      # Admin WA phone
+    "uid":       "",      # Admin WA session uid
 })
 
 def save_global_wa():
     save_json(GLOBAL_WA_FILE, global_wa_data)
-
-_tg_app = None
+_tg_app        = None
 
 countries = load_json(COUNTRIES_FILE, {
     "880": {"name": "Bangladesh",   "flag": "🇧🇩"},
@@ -487,6 +472,7 @@ async def add_earning(uid: str, cc: str) -> float:
             re_["balance"]          = round(re_["balance"] + commission, 2)
             re_["totalEarned"]      = round(re_["totalEarned"] + commission, 2)
             re_["referralEarnings"] = round(re_.get("referralEarnings", 0) + commission, 2)
+            logger.info(f"💸 Referral commission {commission:.2f} taka → uid={referrer_id} (from uid={uid})")
 
     await async_save_earnings()
     return price
@@ -506,6 +492,7 @@ def get_time_ago(dt_str: str) -> str:
         if secs < 86400:return f"{secs // 3600} hours ago"
         return f"{secs // 86400} days ago"
     except Exception as e:
+        logger.warning(f"get_time_ago error for '{dt_str}': {e}")
         return "unknown"
 
 def get_available_countries_for_service(svc: str) -> list:
@@ -528,7 +515,7 @@ async def get_multiple_numbers(cc: str, svc: str, uid: str, count: int) -> list:
             "assignedAt": now, "lastOTP": None, "otpCount": 0
         }
     await async_save_numbers()
-    save_active()
+    save_active()  # sync save — সাথে সাথে file এ লেখে
     await async_save_active()
     return nums
 
@@ -536,7 +523,8 @@ def extract_phone_from_text(text: str):
     m = re.search(r"\+?(\d{10,15})", text)
     return m.group(1) if m else None
 
-_suffix_index: dict = {}
+# ─── Fast suffix index for active number matching ───
+_suffix_index: dict = {}  # { last_8_digits: number }
 
 def rebuild_suffix_index():
     global _suffix_index
@@ -550,36 +538,59 @@ def rebuild_suffix_index():
                     _suffix_index[key] = n
 
 def find_active_number(panel_number: str):
+    """Panel এর number দিয়ে active_numbers এ fast match করো"""
     clean = re.sub(r"\D", "", panel_number).lstrip("0")
+    # Direct match
     if clean in active_numbers:
         return clean
+    # Suffix match via index
     for l in [8, 7, 6]:
         if len(clean) >= l:
             key = clean[-l:]
             if key in _suffix_index:
                 return _suffix_index[key]
     return None
-
-def find_matching_active_number(text: str):
+    # ── Strategy 1: Full number direct match ──
     for num in list(active_numbers.keys()):
         if num in text:
             return num
+
+    # ── Strategy 2: SPYX mask — "4917SPYX5576" (masdar OTP bot format) ──
     spyx_patterns = re.findall(r'(\d{3,})[A-Za-z]{2,8}(\d{2,})', text)
     for prefix, suffix in spyx_patterns:
         for num in list(active_numbers.keys()):
             if num.startswith(prefix) and num.endswith(suffix):
                 return num
+
+    # ── Strategy 3: *** mask — "7921***3002" ──
     masked_patterns = re.findall(r'(\d{3,})\*+(\d{2,})', text)
     for prefix, suffix in masked_patterns:
         for num in list(active_numbers.keys()):
             if num.startswith(prefix) and num.endswith(suffix):
                 return num
+
+    # ── Strategy 4: Number field prefix match ──
+    num_field = re.search(r'[Nn]umber[:\s]+(\d{4,})', text)
+    if num_field:
+        prefix = num_field.group(1)
+        for num in list(active_numbers.keys()):
+            if num.startswith(prefix):
+                return num
+
+    # ── Strategy 5: Last 8/6 digits fallback ──
     for num in list(active_numbers.keys()):
         if num[-8:] in text:
             return num
     for num in list(active_numbers.keys()):
         if num[-6:] in text:
             return num
+
+    # ── Strategy 6: Last 4 digits with any mask ──
+    for num in list(active_numbers.keys()):
+        suffix4 = num[-4:]
+        if re.search(r'[A-Za-z\*]+' + re.escape(suffix4) + r'\b', text):
+            return num
+
     return None
 
 def extract_otp(text: str):
@@ -613,16 +624,19 @@ async def http_otp_handler(request: aio_web.Request) -> aio_web.Response:
         if not number:
             return aio_web.json_response({"ok": False, "error": "number required"}, status=400)
 
+        # active_numbers এ match খোঁজো — leading zeros ছাড়া
         matched_number = None
         if number in active_numbers:
             matched_number = number
         else:
+            # OTP bot ভিন্ন format এ পাঠাতে পারে, তাই suffix match করো
             for n in active_numbers:
                 if n.endswith(number[-8:]) or number.endswith(n[-8:]):
                     matched_number = n
                     break
 
         if not matched_number:
+            logger.warning(f"⚠️ HTTP /otp: number {number} not in active_numbers")
             return aio_web.json_response({"ok": False, "error": "number not active"}, status=404)
 
         an_data = active_numbers[matched_number]
@@ -666,6 +680,7 @@ async def http_otp_handler(request: aio_web.Request) -> aio_web.Response:
         })
         save_otp_log()
 
+        logger.info(f"✅ HTTP /otp processed: +{matched_number} otp={otp_code} uid={uid}")
         return aio_web.json_response({"ok": True, "earned": earned, "balance": balance})
 
     except Exception as e:
@@ -693,10 +708,10 @@ def generate_totp(secret: str):
         remaining = 30 - (int(time.time()) % 30)
         return {"token": token, "timeRemaining": remaining}
     except Exception as e:
-        logger.error(f"generate_totp error: {e}")
+        logger.error(f"generate_totp error (secret_len={len(secret)}): {e}")
         return None
 
-# ─── Baileys API Helpers ───
+# ─── Baileys API (WhatsApp) Helpers ───
 _green_state  = {"authorized": False}
 _green_owner  = load_json(WA_OWNER_FILE, {"uid": None})
 _wa_pair_lock = None
@@ -724,9 +739,11 @@ async def green_get_state(uid: str = None) -> str:
         return "authorized"
     return "notAuthorized"
 
+
 async def green_api_monitor(app):
     logger.info("🟢 Baileys monitor started")
     fail_counts = {}
+
     while True:
         await asyncio.sleep(30)
         try:
@@ -737,16 +754,20 @@ async def green_api_monitor(app):
                     state = await green_get_state(uid)
                     if state != "authorized":
                         fail_counts[uid] = fail_counts.get(uid, 0) + 1
+                        logger.warning(f"⚠️ Baileys: WA check fail #{fail_counts[uid]} uid={uid}")
                         if fail_counts[uid] >= 5:
                             fail_counts.pop(uid, None)
                             wa_sessions.pop(uid, None)
+                            logger.warning(f"⚠️ Baileys: WhatsApp disconnected! uid={uid}")
                             try:
                                 await app.bot.send_message(
                                     int(uid),
-                                    "⚠️ *WhatsApp Disconnected!*\n\nআবার connect করতে নিচের button চাপো।",
+                                    "⚠️ *WhatsApp Disconnected!*\n\n"
+                                    "তোমার WhatsApp থেকে bot disconnect হয়েছে।\n"
+                                    "আবার connect করতে নিচের button চাপো।",
                                     parse_mode="Markdown",
                                     reply_markup=InlineKeyboardMarkup([[
-                                        InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")
+                                        InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect", api_kwargs={"style": "primary"})
                                     ]])
                                 )
                             except Exception as e:
@@ -759,6 +780,7 @@ async def green_api_monitor(app):
             logger.error(f"Baileys monitor loop error: {e}")
 
 async def send_otp_to_group(otp_code: str, group_msg: str, retries: int = 5):
+    """Direct HTTP দিয়ে OTP group এ পাঠাও — PTB rate limit এড়াতে"""
     import aiohttp as _aiohttp
     url     = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
@@ -784,18 +806,59 @@ async def send_otp_to_group(otp_code: str, group_msg: str, retries: int = 5):
                     elif r.status == 429:
                         data       = await r.json()
                         retry_after = data.get("parameters", {}).get("retry_after", 10)
+                        logger.warning(f"⚠️ OTP Group Flood Wait {retry_after}s")
                         await asyncio.sleep(retry_after + 1)
                         continue
                     else:
+                        logger.error(f"❌ OTP group send failed ({r.status})")
                         return False
         except Exception as e:
             logger.error(f"❌ OTP group send error: {e}")
             if attempt < retries:
                 await asyncio.sleep(3)
     return False
+    logger.info("🟢 Baileys monitor started")
+    fail_counts = {}  # { uid: fail_count }
+
+    while True:
+        await asyncio.sleep(30)
+        try:
+            for uid in list(wa_sessions.keys()):
+                if not wa_sessions.get(uid, {}).get("connected"):
+                    continue
+                try:
+                    state = await green_get_state(uid)
+                    if state != "authorized":
+                        fail_counts[uid] = fail_counts.get(uid, 0) + 1
+                        logger.warning(f"⚠️ Baileys: WA check fail #{fail_counts[uid]} uid={uid}")
+                        # ৫ বার fail হলে disconnect বলবে
+                        if fail_counts[uid] >= 5:
+                            fail_counts.pop(uid, None)
+                            wa_sessions.pop(uid, None)
+                            logger.warning(f"⚠️ Baileys: WhatsApp disconnected! uid={uid}")
+                            try:
+                                await app.bot.send_message(
+                                    int(uid),
+                                    "⚠️ *WhatsApp Disconnected!*\n\n"
+                                    "তোমার WhatsApp থেকে bot disconnect হয়েছে।\n"
+                                    "আবার connect করতে নিচের button চাপো।",
+                                    parse_mode="Markdown",
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect", api_kwargs={"style": "primary"})
+                                    ]])
+                                )
+                            except Exception as e:
+                                logger.error(f"Disconnect notify error uid={uid}: {e}")
+                    else:
+                        fail_counts.pop(uid, None)
+                except Exception as e:
+                    logger.error(f"Baileys monitor error uid={uid}: {e}")
+        except Exception as e:
+            logger.error(f"Baileys monitor loop error: {e}")
 
 async def get_wa_pairing_code(phone: str, user_id: str) -> str:
     digits = re.sub(r"\D", "", phone)
+    logger.info(f"📱 Baileys pairing for: +{digits} uid={user_id}")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
         None,
@@ -806,6 +869,7 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         None,
         lambda: baileys_request("POST", "/pair", {"phone": digits, "userId": user_id})
     )
+    logger.info(f"Baileys pairing result: {result}")
     if result.get("connected"):
         raise Exception("WhatsApp ইতিমধ্যে connected আছে।")
     if result.get("code"):
@@ -814,23 +878,31 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         if len(clean) >= 8:
             return f"{clean[:4]}-{clean[4:8]}"
         return code
-    raise Exception(result.get("error") or "Pairing code পাওয়া যায়নি।")
+    raise Exception(
+        result.get("error") or
+        "Pairing code পাওয়া যায়নি। Baileys server চালু আছে কিনা দেখো।"
+    )
 
 async def monitor_wa_connection(uid: str, context):
+    logger.info(f"🔍 Waiting for WA auth: {uid}")
     for _ in range(60):
         await asyncio.sleep(5)
         try:
             state = await green_get_state(uid)
             if state == "authorized":
                 wa_sessions[uid] = {"connected": True}
+                logger.info(f"✅ WA connected: uid={uid}")
                 try:
                     await context.bot.send_message(
                         int(uid),
-                        "✅ *WhatsApp Connected!*\n\n🟢 সফলভাবে connect হয়েছে।",
+                        "✅ *WhatsApp Connected!*\n\n"
+                        "🟢 তোমার WhatsApp সফলভাবে connect হয়েছে।\n"
+                        "এখন numbers assign হলে WA check দেখাবে।\n\n"
+                        "Disconnect করতে নিচের বাটন চাপো:",
                         parse_mode="Markdown",
                         reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔴 Logout", callback_data="wa_disconnect")],
-                            [InlineKeyboardButton("📊 Check Status", callback_data="wa_status")],
+                            [InlineKeyboardButton("🔴 Logout / Disconnect", callback_data="wa_disconnect", api_kwargs={"style": "success"})],
+                            [InlineKeyboardButton("📊 Check Status", callback_data="wa_status", api_kwargs={"style": "danger"})],
                         ])
                     )
                 except:
@@ -840,6 +912,7 @@ async def monitor_wa_connection(uid: str, context):
             logger.warning(f"monitor_wa_connection error: {e}")
 
 async def check_wa_number(phone: str, user_id: str):
+    # ── Global WA enabled হলে admin WA দিয়ে check করো ──
     effective_uid = user_id
     if global_wa_data.get("enabled") and global_wa_data.get("connected"):
         effective_uid = global_wa_data.get("uid", user_id)
@@ -856,18 +929,23 @@ async def check_wa_number(phone: str, user_id: str):
             None,
             lambda: baileys_request("POST", "/check", {"numbers": [digits], "userId": effective_uid})
         )
+        logger.info(f"📱 WA check +{digits}: {result}")
         results = result.get("results", {})
         val = results.get(digits)
         if val is True:  return True
         if val is False: return False
         return None
     except Exception as e:
+        logger.warning(f"check_wa_number error +{digits}: {e}")
         return None
 
 # ─── Mail.tm API ───
 def mailtm_request(method: str, path: str, body=None, token=None):
     url = f"https://api.mail.tm{path}"
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
     data = json.dumps(body).encode() if body else None
@@ -877,15 +955,19 @@ def mailtm_request(method: str, path: str, body=None, token=None):
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:
-            return json.loads(e.read().decode())
+            err = json.loads(e.read().decode())
+            return err
         except:
             return None
     except Exception as e:
+        logger.error(f"Mail.tm error: {e}")
         return None
 
 async def mailtm_request_async(method: str, path: str, body=None, token=None):
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: mailtm_request(method, path, body, token))
+    return await loop.run_in_executor(
+        None, lambda: mailtm_request(method, path, body, token)
+    )
 
 def random_str(n: int, chars="abcdefghijklmnopqrstuvwxyz0123456789") -> str:
     import random
@@ -919,6 +1001,7 @@ async def create_fresh_email():
             "createdAt": datetime.now().isoformat()
         }
     except Exception as e:
+        logger.error(f"createFreshEmail error: {e}")
         return None
 
 async def get_email_inbox(email_obj: dict):
@@ -966,39 +1049,39 @@ async def check_membership(user_id: int, app) -> dict:
 # ─── Keyboards ───
 def main_keyboard():
     return ReplyKeyboardMarkup([
-        [rbtn("☎️ Get Number", "primary"), rbtn("📧 Get Tempmail", "success")],
-        [rbtn("🔐 2FA", "danger"), rbtn("💰 Balances", "primary")],
-        [rbtn("💸 Withdraw", "success"), rbtn("👥 Referral", "danger")],
-        [rbtn("💬 Support", "primary")]
+        ["☎️ Get Number", "📧 Get Tempmail"],
+        ["🔐 2FA", "💰 Balances"],
+        ["💸 Withdraw", "👥 Referral"],
+        ["💬 Support"]
     ], resize_keyboard=True)
 
 def verify_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣ 📢 Main Channel", url=MAIN_CHANNEL_URL)],
-        [InlineKeyboardButton("2️⃣ 💬 Number Channel", url=CHAT_GROUP)],
-        [InlineKeyboardButton("3️⃣ 📨 OTP Group", url=OTP_GROUP)],
-        [InlineKeyboardButton("✅ VERIFY MEMBERSHIP", callback_data="verify_user")],
+        [InlineKeyboardButton("1️⃣ 📢 Main Channel", url=MAIN_CHANNEL_URL, api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("2️⃣ 💬 Number Channel", url=CHAT_GROUP, api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("3️⃣ 📨 OTP Group", url=OTP_GROUP, api_kwargs={"style": "danger"})],
+        [InlineKeyboardButton("✅ VERIFY MEMBERSHIP", callback_data="verify_user", api_kwargs={"style": "primary"})],
     ])
 
 def admin_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Stock Report", callback_data="admin_stock"),
-         InlineKeyboardButton("👥 User Stats", callback_data="admin_users")],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
-         InlineKeyboardButton("📋 OTP Log", callback_data="admin_otp_log")],
-        [InlineKeyboardButton("➕ Add Numbers", callback_data="admin_add_numbers"),
-         InlineKeyboardButton("📤 Upload File", callback_data="admin_upload")],
-        [InlineKeyboardButton("🗑️ Delete Numbers", callback_data="admin_delete"),
-         InlineKeyboardButton("🔧 Manage Services", callback_data="admin_manage_services")],
-        [InlineKeyboardButton("🌍 Manage Countries", callback_data="admin_manage_countries"),
-         InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings")],
-        [InlineKeyboardButton("💰 Country Prices", callback_data="admin_country_prices"),
-         InlineKeyboardButton("💸 Withdrawals", callback_data="admin_withdrawals")],
-        [InlineKeyboardButton("👛 Balance Management", callback_data="admin_balance_manage"),
-         InlineKeyboardButton("👥 Referral Stats", callback_data="admin_referral_stats")],
-        [InlineKeyboardButton("📡 OTP Panels", callback_data="admin_panels"),
-         InlineKeyboardButton("📱 Global WA", callback_data="admin_global_wa")],
-        [InlineKeyboardButton("🚪 Logout", callback_data="admin_logout")],
+        [InlineKeyboardButton("📊 Stock Report", callback_data="admin_stock", api_kwargs={"style": "primary"}),
+         InlineKeyboardButton("👥 User Stats", callback_data="admin_users", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast", api_kwargs={"style": "danger"}),
+         InlineKeyboardButton("📋 OTP Log", callback_data="admin_otp_log", api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("➕ Add Numbers", callback_data="admin_add_numbers", api_kwargs={"style": "success"}),
+         InlineKeyboardButton("📤 Upload File", callback_data="admin_upload", api_kwargs={"style": "danger"})],
+        [InlineKeyboardButton("🗑️ Delete Numbers", callback_data="admin_delete", api_kwargs={"style": "primary"}),
+         InlineKeyboardButton("🔧 Manage Services", callback_data="admin_manage_services", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("🌍 Manage Countries", callback_data="admin_manage_countries", api_kwargs={"style": "danger"}),
+         InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings", api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("💰 Country Prices", callback_data="admin_country_prices", api_kwargs={"style": "success"}),
+         InlineKeyboardButton("💸 Withdrawals", callback_data="admin_withdrawals", api_kwargs={"style": "danger"})],
+        [InlineKeyboardButton("👛 Balance Management", callback_data="admin_balance_manage", api_kwargs={"style": "primary"}),
+         InlineKeyboardButton("👥 Referral Stats", callback_data="admin_referral_stats", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("📡 OTP Panels", callback_data="admin_panels", api_kwargs={"style": "danger"}),
+         InlineKeyboardButton("📱 Global WA", callback_data="admin_global_wa", api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("🚪 Logout", callback_data="admin_logout", api_kwargs={"style": "danger"})],
     ])
 
 # ─── User Session State ───
@@ -1021,16 +1104,20 @@ async def ensure_verified(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     uid  = str(user.id)
     sess = get_session(uid)
 
+    # Admin সবসময় pass
     if sess["is_admin"] or is_admin(uid):
         sess["is_admin"] = True
         return True
 
+    # Verification বন্ধ থাকলে pass
     if not settings.get("requireVerification", True):
         return True
 
+    # Local flag চেক — chat_member handler real-time এ update করে
     if sess.get("verified") or users.get(uid, {}).get("verified", False):
         return True
 
+    # Verified না — rejoin করতে বলো, block না
     msg = (
         "⚠️ *Bot ব্যবহার করতে সকল গ্রুপে join করতে হবে!*\n\n"
         "নিচের সবগুলোতে join করুন, তারপর VERIFY চাপুন:"
@@ -1065,11 +1152,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if context.args and context.args[0].startswith("ref_"):
             referrer_id = context.args[0][4:]
+            # শুধু referredBy সেট করো — verify সফল হওয়ার আগে count হবে না
             if (referrer_id != uid
                     and not users[uid].get("referredBy")
                     and referrer_id in users):
                 users[uid]["referredBy"] = referrer_id
                 users[uid]["referralVerified"] = False
+                logger.info(f"🔗 Referral pending verify: uid={uid} referred by uid={referrer_id}")
 
         await async_save_users()
 
@@ -1118,6 +1207,7 @@ async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uid in users:
             users[uid]["verified"] = True
 
+            # ── Referral: শুধু প্রথমবার verify হলে count করো ──
             if not users[uid].get("referralVerified", False):
                 referrer_id = users[uid].get("referredBy")
                 if referrer_id and referrer_id in users:
@@ -1127,12 +1217,13 @@ async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if uid not in referrals[referrer_id]:
                         referrals[referrer_id].append(uid)
                     await async_save_referrals()
+                    logger.info(f"✅ Referral confirmed: uid={uid} → referrer={referrer_id}")
                     try:
                         await context.bot.send_message(
                             int(referrer_id),
                             f"🎉 *New Referral Confirmed!*\n\n"
-                            f"👤 *{user.first_name}* verified হয়েছে!\n"
-                            f"💸 তারা OTP earn করলে তুমি *{settings.get('referralCommission', 10)}%* commission পাবে।",
+                            f"👤 *{user.first_name}* সব group join করে verified হয়েছে!\n"
+                            f"💸 তারা OTP থেকে earn করলে তুমি *{settings.get('referralCommission', 10)}%* commission পাবে।",
                             parse_mode="Markdown"
                         )
                     except:
@@ -1198,18 +1289,19 @@ async def handle_get_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not avail:
         return await update.message.reply_text("📭 *No Numbers Available*\n\nPlease try again later.", parse_mode="Markdown")
 
+    # ── 3-color cycle for service buttons ──
     _svc_colors = ["primary", "success", "danger"]
     buttons = []
     for i in range(0, len(avail), 2):
         row = []
         row.append(InlineKeyboardButton(
             f"{avail[i][1]['icon']} {avail[i][1]['name']} ({avail[i][2]})",
-            callback_data=f"svc:{avail[i][0]}"
+            callback_data=f"svc:{avail[i][0]}", api_kwargs={"style": _svc_colors[i % 3]}
         ))
         if i+1 < len(avail):
             row.append(InlineKeyboardButton(
                 f"{avail[i+1][1]['icon']} {avail[i+1][1]['name']} ({avail[i+1][2]})",
-                callback_data=f"svc:{avail[i+1][0]}"
+                callback_data=f"svc:{avail[i+1][0]}", api_kwargs={"style": _svc_colors[(i+1) % 3]}
             ))
         buttons.append(row)
 
@@ -1219,6 +1311,7 @@ async def handle_get_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
+# ─── cb_select_service — 3-COLOR FIX ───
 async def cb_select_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not await ensure_verified(update, context):
@@ -1231,6 +1324,7 @@ async def cb_select_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ccs:
         return await query.answer("❌ No numbers available", show_alert=True)
 
+    # ── 3-color cycle: primary=blue, success=green, danger=red ──
     _cc_colors = ["primary", "success", "danger"]
     buttons = []
     for i in range(0, len(ccs), 2):
@@ -1238,16 +1332,18 @@ async def cb_select_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cc1 = ccs[i]; c1 = countries[cc1]; p1 = get_otp_price(cc1)
         row.append(InlineKeyboardButton(
             f"{c1['flag']} {c1['name']} ({p1:.2f}TK)",
-            callback_data=f"cc:{svc_id}:{cc1}"
+            callback_data=f"cc:{svc_id}:{cc1}",
+            api_kwargs={"style": _cc_colors[i % 3]}
         ))
         if i+1 < len(ccs):
             cc2 = ccs[i+1]; c2 = countries[cc2]; p2 = get_otp_price(cc2)
             row.append(InlineKeyboardButton(
                 f"{c2['flag']} {c2['name']} ({p2:.2f}TK)",
-                callback_data=f"cc:{svc_id}:{cc2}"
+                callback_data=f"cc:{svc_id}:{cc2}",
+                api_kwargs={"style": _cc_colors[(i+1) % 3]}
             ))
         buttons.append(row)
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="back_services")])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="back_services", api_kwargs={"style": "danger"})])
 
     await query.edit_message_text(
         f"{svc['icon']} *{svc['name']}* — Select Country\n\n_(taka = earnings per OTP)_",
@@ -1298,6 +1394,9 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 OTP automatically আসবে।"
         )
 
+    # ── Copy buttons — ২টা করে এক row ──
+    from telegram import CopyTextButton
+
     def make_copy_buttons(wa_result=None):
         rows = []
         for n in nums:
@@ -1312,12 +1411,12 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return rows
 
     bottom_buttons = [
-        [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
-        [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
-        [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
+        [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP, api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("🔙 Service List", callback_data="back_services", api_kwargs={"style": "danger"})],
     ]
     if not wa_connected:
-        bottom_buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
+        bottom_buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect", api_kwargs={"style": "primary"})])
 
     buttons = make_copy_buttons() + bottom_buttons
     await query.edit_message_text(make_msg(), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
@@ -1339,6 +1438,7 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=InlineKeyboardMarkup(make_copy_buttons(res) + bottom_buttons)
                 )
             except: pass
+        asyncio.create_task(do_wa_check())
         asyncio.create_task(do_wa_check())
 
 async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1382,6 +1482,8 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 OTP automatically আসবে।"
         )
 
+    from telegram import CopyTextButton
+
     def make_copy_buttons_new(wa_result=None):
         rows = []
         for n in nums:
@@ -1396,12 +1498,12 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return rows
 
     bottom_buttons_new = [
-        [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
-        [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
-        [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
+        [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP, api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("🔙 Service List", callback_data="back_services", api_kwargs={"style": "danger"})],
     ]
     if not wa_connected:
-        bottom_buttons_new.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
+        bottom_buttons_new.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect", api_kwargs={"style": "primary"})])
 
     buttons = make_copy_buttons_new() + bottom_buttons_new
     await query.edit_message_text(make_msg_new(), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
@@ -1435,17 +1537,19 @@ async def cb_back_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total = sum(len(numbers_by_cs.get(cc, {}).get(svc_id, [])) for cc in ccs)
             avail.append((svc_id, svc, total))
 
+    # ── 3-color cycle ──
+    _svc_colors = ["primary", "success", "danger"]
     buttons = []
     for i in range(0, len(avail), 2):
         row = []
         row.append(InlineKeyboardButton(
             f"{avail[i][1]['icon']} {avail[i][1]['name']} ({avail[i][2]})",
-            callback_data=f"svc:{avail[i][0]}"
+            callback_data=f"svc:{avail[i][0]}", api_kwargs={"style": _svc_colors[i % 3]}
         ))
         if i+1 < len(avail):
             row.append(InlineKeyboardButton(
                 f"{avail[i+1][1]['icon']} {avail[i+1][1]['name']} ({avail[i+1][2]})",
-                callback_data=f"svc:{avail[i+1][0]}"
+                callback_data=f"svc:{avail[i+1][0]}", api_kwargs={"style": _svc_colors[(i+1) % 3]}
             ))
         buttons.append(row)
 
@@ -1477,8 +1581,8 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 *Minimum Withdraw:* {settings['minWithdraw']} taka",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💸 Withdraw", callback_data="start_withdraw")],
-            [InlineKeyboardButton("📋 Withdraw History", callback_data="withdraw_history")],
+            [InlineKeyboardButton("💸 Withdraw", callback_data="start_withdraw", api_kwargs={"style": "danger"})],
+            [InlineKeyboardButton("📋 Withdraw History", callback_data="withdraw_history", api_kwargs={"style": "primary"})],
         ])
     )
 
@@ -1497,7 +1601,8 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if referred_list:
         for r_uid in referred_list[-5:][::-1]:
             r_user = users.get(r_uid, {})
-            r_name = r_user.get("first_name", "User").replace("*", "").replace("_", "")
+            r_name = r_user.get("first_name", "User")
+            r_name = r_name.replace("*", "").replace("_", "")
             r_earn  = get_user_earnings(r_uid)
             my_cut  = round(r_earn.get("totalEarned", 0) * commission / 100, 2)
             referred_text += f"  👤 {r_name} — তোমার cut: *{my_cut:.2f} taka*\n"
@@ -1524,8 +1629,8 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Share Referral Link", url=f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}")],
-            [InlineKeyboardButton("📊 Referral Stats", callback_data="ref_stats")],
+            [InlineKeyboardButton("🔗 Share Referral Link", url=f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}&text={urllib.parse.quote(f'আমার referral link দিয়ে join করো এবং OTP থেকে আয় করো!')}", api_kwargs={"style": "success"})],
+            [InlineKeyboardButton("📊 Referral Stats", callback_data="ref_stats", api_kwargs={"style": "danger"})],
         ])
     )
 
@@ -1558,7 +1663,7 @@ async def cb_ref_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "এখনো কোনো referral নেই।\n"
 
     if len(msg) > 4000:
-        msg = msg[:3950] + "..._truncated_"
+        msg = msg[:3950] + "\n..._truncated_"
 
     bot_username = context.bot.username
     ref_link = get_referral_link(uid, bot_username)
@@ -1566,8 +1671,8 @@ async def cb_ref_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         msg, parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Share Link", url=f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}")],
-            [InlineKeyboardButton("🔙 Back", callback_data="goto_main")],
+            [InlineKeyboardButton("🔗 Share Link", url=f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}", api_kwargs={"style": "primary"})],
+            [InlineKeyboardButton("🔙 Back", callback_data="goto_main", api_kwargs={"style": "success"})],
         ])
     )
 
@@ -1594,9 +1699,9 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💸 *Withdraw*\n\n💵 Balance: *{e['balance']:.2f} taka*\n\nChoose method:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟣 bKash", callback_data="wm:bKash"),
-             InlineKeyboardButton("🟠 Nagad", callback_data="wm:Nagad")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="w_cancel")],
+            [InlineKeyboardButton("🟣 bKash", callback_data="wm:bKash", api_kwargs={"style": "danger"}),
+             InlineKeyboardButton("🟠 Nagad", callback_data="wm:Nagad", api_kwargs={"style": "primary"})],
+            [InlineKeyboardButton("❌ Cancel", callback_data="w_cancel", api_kwargs={"style": "success"})],
         ])
     )
 
@@ -1618,12 +1723,12 @@ async def cb_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     rows = []
     for i in range(0, len(amounts), 2):
-        row = [InlineKeyboardButton(f"{amounts[i]} taka", callback_data=f"wa:{method}:{amounts[i]}")]
+        row = [InlineKeyboardButton(f"{amounts[i]} taka", callback_data=f"wa:{method}:{amounts[i]}", api_kwargs={"style": "primary"})]
         if i+1 < len(amounts):
-            row.append(InlineKeyboardButton(f"{amounts[i+1]} taka", callback_data=f"wa:{method}:{amounts[i+1]}"))
+            row.append(InlineKeyboardButton(f"{amounts[i+1]} taka", callback_data=f"wa:{method}:{amounts[i+1]}", api_kwargs={"style": "success"}))
         rows.append(row)
-    rows.append([InlineKeyboardButton(f"💰 All ({e['balance']:.2f} taka)", callback_data=f"wa:{method}:{e['balance']:.2f}")])
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="w_cancel")])
+    rows.append([InlineKeyboardButton(f"💰 All ({e['balance']:.2f} taka)", callback_data=f"wa:{method}:{e['balance']:.2f}", api_kwargs={"style": "danger"})])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="w_cancel", api_kwargs={"style": "primary"})])
 
     icon = "🟣" if method == "bKash" else "🟠"
     await query.edit_message_text(
@@ -1653,7 +1758,7 @@ async def cb_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(
         f"{icon} *{method} — {amount:.2f} taka*\n\n📱 Your *{method} number:*\nExample: `01712345678`",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="w_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="w_cancel", api_kwargs={"style": "success"})]])
     )
 
 async def cb_withdraw_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1682,7 +1787,7 @@ async def cb_withdraw_history(update: Update, context: ContextTypes.DEFAULT_TYPE
             text += f"📱 `{w['account']}` | {date}\n\n"
 
     await query.edit_message_text(text, parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="goto_main")]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="goto_main", api_kwargs={"style": "danger"})]]))
 
 async def cb_start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1705,9 +1810,9 @@ async def cb_start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💸 *Withdraw*\n\n💵 Balance: *{e['balance']:.2f} taka*\n\nChoose method:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟣 bKash", callback_data="wm:bKash"),
-             InlineKeyboardButton("🟠 Nagad", callback_data="wm:Nagad")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="w_cancel")],
+            [InlineKeyboardButton("🟣 bKash", callback_data="wm:bKash", api_kwargs={"style": "primary"}),
+             InlineKeyboardButton("🟠 Nagad", callback_data="wm:Nagad", api_kwargs={"style": "success"})],
+            [InlineKeyboardButton("❌ Cancel", callback_data="w_cancel", api_kwargs={"style": "danger"})],
         ])
     )
 
@@ -1719,11 +1824,13 @@ async def cb_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if wa_sessions.get(uid, {}).get("connected"):
         await query.edit_message_text(
-            "✅ *WhatsApp Already Connected!*",
+            "✅ *WhatsApp Already Connected!*\n\n"
+            "🟢 WhatsApp এখন active আছে।\n"
+            "Disconnect করতে নিচের বাটন চাপো:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔴 Logout", callback_data="wa_disconnect")],
-                [InlineKeyboardButton("📊 Check Status", callback_data="wa_status")],
+                [InlineKeyboardButton("🔴 Logout / Disconnect", callback_data="wa_disconnect", api_kwargs={"style": "primary"})],
+                [InlineKeyboardButton("📊 Check Status", callback_data="wa_status", api_kwargs={"style": "success"})],
             ])
         )
         return
@@ -1751,9 +1858,13 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         wa_sessions.pop(uid, None)
 
-    text = "✅ *WhatsApp Connected!*" if conn else "🔴 *WhatsApp connected নেই।*"
-    btns = [[InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")]] if conn else \
-           [[InlineKeyboardButton("📱 Connect", callback_data="wa_connect")]]
+    STATE_MAP = {
+        "authorized":    "✅ *WhatsApp Connected!*\n\nNumber assign হলে 📱/❌ দেখাবে।",
+        "notAuthorized": "🔴 *WhatsApp connected নেই।*\n\nCode enter করলে আবার Check Status চাপো।",
+    }
+    text = STATE_MAP.get(state, f"❓ Unknown state: {state}")
+    btns = [[InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect", api_kwargs={"style": "danger"})]] if conn else \
+           [[InlineKeyboardButton("📱 Connect", callback_data="wa_connect", api_kwargs={"style": "primary"})]]
     await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
 
 async def cb_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1764,16 +1875,19 @@ async def cb_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: baileys_request("POST", "/disconnect", {"userId": uid}))
+        logger.info(f"✅ Baileys logout called for uid={uid}")
     except Exception as e:
         logger.error(f"Baileys logout error: {e}")
 
     wa_sessions.pop(uid, None)
 
     await query.edit_message_text(
-        "🔴 *WhatsApp Disconnected!*",
+        "🔴 *WhatsApp Disconnected!*\n\n"
+        "তোমার WhatsApp সফলভাবে logout হয়েছে।\n"
+        "আবার connect করতে নিচের বাটন চাপো:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")],
+            [InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect", api_kwargs={"style": "success"})],
         ])
     )
 
@@ -1790,17 +1904,17 @@ async def handle_tempmail(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📧 *Temporary Email*\n\n📌 Your email:\n`{existing['address']}`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📬 Check Inbox", callback_data="tm_inbox")],
-                [InlineKeyboardButton("📋 Show Email", callback_data="tm_show")],
-                [InlineKeyboardButton("🔄 Get New Email", callback_data="tm_create")],
-                [InlineKeyboardButton("🗑️ Delete Email", callback_data="tm_delete")],
+                [InlineKeyboardButton("📬 Check Inbox", callback_data="tm_inbox", api_kwargs={"style": "danger"})],
+                [InlineKeyboardButton("📋 Show Email", callback_data="tm_show", api_kwargs={"style": "primary"})],
+                [InlineKeyboardButton("🔄 Get New Email", callback_data="tm_create", api_kwargs={"style": "success"})],
+                [InlineKeyboardButton("🗑️ Delete Email", callback_data="tm_delete", api_kwargs={"style": "danger"})],
             ])
         )
     else:
         await update.message.reply_text(
             "📧 *Temporary Email*\n\n✅ Create a new disposable email address.",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🆕 Create New Email", callback_data="tm_create")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🆕 Create New Email", callback_data="tm_create", api_kwargs={"style": "primary"})]])
         )
 
 async def cb_tm_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1817,7 +1931,7 @@ async def cb_tm_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "❌ *Email creation failed.* Please try again.",
                     chat_id=uid, message_id=loading.message_id,
                     parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Retry", callback_data="tm_create")]])
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Retry", callback_data="tm_create", api_kwargs={"style": "success"})]])
                 )
                 return
             temp_mails[uid] = new_email
@@ -1827,13 +1941,21 @@ async def cb_tm_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=uid, message_id=loading.message_id,
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📬 Check Inbox", callback_data="tm_inbox")],
-                    [InlineKeyboardButton("🔄 Get New Email", callback_data="tm_create")],
-                    [InlineKeyboardButton("🗑️ Delete", callback_data="tm_delete")],
+                    [InlineKeyboardButton("📬 Check Inbox", callback_data="tm_inbox", api_kwargs={"style": "danger"})],
+                    [InlineKeyboardButton("🔄 Get New Email", callback_data="tm_create", api_kwargs={"style": "primary"})],
+                    [InlineKeyboardButton("🗑️ Delete", callback_data="tm_delete", api_kwargs={"style": "success"})],
                 ])
             )
         except Exception as e:
             logger.error(f"cb_tm_create task error uid={uid}: {e}")
+            try:
+                await context.bot.edit_message_text(
+                    "❌ *Error occurred.* Please try again.",
+                    chat_id=uid, message_id=loading.message_id,
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
 
     asyncio.create_task(_create_task())
 
@@ -1845,7 +1967,7 @@ async def cb_tm_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid not in temp_mails:
         return await query.edit_message_text(
             "❌ No email found.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🆕 Create", callback_data="tm_create")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🆕 Create", callback_data="tm_create", api_kwargs={"style": "danger"})]])
         )
 
     email_obj = temp_mails[uid]
@@ -1871,9 +1993,9 @@ async def cb_tm_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             try:
                 await query.edit_message_text(text[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Refresh", callback_data="tm_inbox")],
-                    [InlineKeyboardButton("🔄 New Email", callback_data="tm_create")],
-                    [InlineKeyboardButton("🗑️ Delete", callback_data="tm_delete")],
+                    [InlineKeyboardButton("🔄 Refresh", callback_data="tm_inbox", api_kwargs={"style": "primary"})],
+                    [InlineKeyboardButton("🔄 New Email", callback_data="tm_create", api_kwargs={"style": "success"})],
+                    [InlineKeyboardButton("🗑️ Delete", callback_data="tm_delete", api_kwargs={"style": "danger"})],
                 ]))
             except:
                 pass
@@ -1893,8 +2015,8 @@ async def cb_tm_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📧 *Your Temp Email:*\n\n`{addr}`",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📬 Check Inbox", callback_data="tm_inbox")],
-            [InlineKeyboardButton("🔄 New Email", callback_data="tm_create")],
+            [InlineKeyboardButton("📬 Check Inbox", callback_data="tm_inbox", api_kwargs={"style": "primary"})],
+            [InlineKeyboardButton("🔄 New Email", callback_data="tm_create", api_kwargs={"style": "success"})],
         ])
     )
 
@@ -1915,10 +2037,10 @@ async def handle_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔐 *2-Step Verification Code Generator*\n\nSelect a service:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📘 Facebook 2FA", callback_data="totp:facebook")],
-            [InlineKeyboardButton("📸 Instagram 2FA", callback_data="totp:instagram")],
-            [InlineKeyboardButton("🔍 Google 2FA", callback_data="totp:google")],
-            [InlineKeyboardButton("⚙️ Other 2FA", callback_data="totp:other")],
+            [InlineKeyboardButton("📘 Facebook 2FA", callback_data="totp:facebook", api_kwargs={"style": "danger"})],
+            [InlineKeyboardButton("📸 Instagram 2FA", callback_data="totp:instagram", api_kwargs={"style": "primary"})],
+            [InlineKeyboardButton("🔍 Google 2FA", callback_data="totp:google", api_kwargs={"style": "success"})],
+            [InlineKeyboardButton("⚙️ Other 2FA", callback_data="totp:other", api_kwargs={"style": "danger"})],
         ])
     )
 
@@ -1943,10 +2065,10 @@ async def cb_totp_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"{icon} *{name} Secret Key*\n\n"
         f"Send your Authenticator Secret Key.\n\n"
-        f"🔑 Example: `JBSWY3DPEHPK3PXP`\n\n"
+        f"🔑 It looks like: `JBSWY3DPEHPK3PXP`\n\n"
         f"Type /cancel to cancel",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="totp_back")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="totp_back", api_kwargs={"style": "primary"})]])
     )
 
 async def cb_totp_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1956,10 +2078,10 @@ async def cb_totp_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔐 *2FA Code Generator*\n\nSelect a service:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📘 Facebook 2FA", callback_data="totp:facebook")],
-            [InlineKeyboardButton("📸 Instagram 2FA", callback_data="totp:instagram")],
-            [InlineKeyboardButton("🔍 Google 2FA", callback_data="totp:google")],
-            [InlineKeyboardButton("⚙️ Other 2FA", callback_data="totp:other")],
+            [InlineKeyboardButton("📘 Facebook 2FA", callback_data="totp:facebook", api_kwargs={"style": "success"})],
+            [InlineKeyboardButton("📸 Instagram 2FA", callback_data="totp:instagram", api_kwargs={"style": "danger"})],
+            [InlineKeyboardButton("🔍 Google 2FA", callback_data="totp:google", api_kwargs={"style": "primary"})],
+            [InlineKeyboardButton("⚙️ Other 2FA", callback_data="totp:other", api_kwargs={"style": "success"})],
         ])
     )
 
@@ -1970,8 +2092,8 @@ async def cb_totp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if secret_enc == "TOOLONG":
         await query.edit_message_text(
-            "⚠️ Secret key টি অনেক বড়। আবার 🔐 2FA বাটন চাপুন।",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="totp_back")]]))
+            "⚠️ Secret key টি অনেক বড়। Refresh করতে আবার 🔐 2FA বাটন চাপুন।",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="totp_back", api_kwargs={"style": "danger"})]]))
         return
 
     secret = urllib.parse.unquote(secret_enc)
@@ -1994,8 +2116,8 @@ async def cb_totp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏰ *{result['timeRemaining']} seconds remaining*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Refresh Code", callback_data=cb_data)],
-                [InlineKeyboardButton("🔙 Back", callback_data="totp_back")],
+                [InlineKeyboardButton("🔄 Refresh Code", callback_data=cb_data, api_kwargs={"style": "primary"})],
+                [InlineKeyboardButton("🔙 Back", callback_data="totp_back", api_kwargs={"style": "success"})],
             ])
         )
     except:
@@ -2006,7 +2128,7 @@ async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💬 *Support*\n\nContact admin:\n📌 @sadhin8miya",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Contact", url="https://t.me/sadhin8miya")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Contact", url="https://t.me/sadhin8miya", api_kwargs={"style": "danger"})]])
     )
 
 # ─── Admin Callbacks ───
@@ -2039,8 +2161,8 @@ async def cb_admin_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = report[:3950] + "\n..._truncated_"
 
     await safe_edit(query, report, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_stock")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_stock", api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "success"})],
     ]))
 
 async def cb_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2073,11 +2195,19 @@ async def cb_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = msg[:3950] + "..._truncated_"
 
         await safe_edit(query, msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data="admin_users")],
-            [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+            [InlineKeyboardButton("🔄 Refresh", callback_data="admin_users", api_kwargs={"style": "danger"})],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
         ]))
     except Exception as e:
-        logger.error(f"cb_admin_users error: {e}")
+        logger.error(f"cb_admin_users error: {e}", exc_info=True)
+        try:
+            await query.edit_message_text(
+                f"❌ *Error loading user stats*\n\n`{str(e)[:200]}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "success"})]])
+            )
+        except:
+            pass
 
 async def cb_admin_otp_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2095,8 +2225,8 @@ async def cb_admin_otp_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"🕐 {get_time_ago(log.get('timestamp',''))}\n\n"
 
     await safe_edit(query, msg[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_otp_log")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_otp_log", api_kwargs={"style": "danger"})],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
     ]))
 
 async def cb_admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2110,7 +2240,7 @@ async def cb_admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(
         "📢 *Broadcast Message*\n\nSend the message to broadcast to all users:",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "success"})]])
     )
 
 async def cb_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2132,14 +2262,14 @@ async def cb_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 Referral Commission: *{commission}%*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📞 Number Count", callback_data="as_count"),
-             InlineKeyboardButton("⏱ Cooldown", callback_data="as_cooldown")],
-            [InlineKeyboardButton(f"🔐 Verification {'Disable' if settings['requireVerification'] else 'Enable'}", callback_data="as_toggle_verify")],
-            [InlineKeyboardButton("💵 OTP Price", callback_data="as_price"),
-             InlineKeyboardButton("💸 Min Withdraw", callback_data="as_minw")],
-            [InlineKeyboardButton(f"🏧 Withdraw {'🔴 Disable' if settings['withdrawEnabled'] else '🟢 Enable'}", callback_data="as_toggle_withdraw")],
-            [InlineKeyboardButton(f"👥 Referral Commission ({commission}%)", callback_data="as_referral_commission")],
-            [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+            [InlineKeyboardButton("📞 Number Count", callback_data="as_count", api_kwargs={"style": "danger"}),
+             InlineKeyboardButton("⏱ Cooldown", callback_data="as_cooldown", api_kwargs={"style": "primary"})],
+            [InlineKeyboardButton(f"🔐 Verification {'Disable' if settings['requireVerification'] else 'Enable'}", callback_data="as_toggle_verify", api_kwargs={"style": "success"})],
+            [InlineKeyboardButton("💵 OTP Price", callback_data="as_price", api_kwargs={"style": "danger"}),
+             InlineKeyboardButton("💸 Min Withdraw", callback_data="as_minw", api_kwargs={"style": "primary"})],
+            [InlineKeyboardButton(f"🏧 Withdraw {'🔴 Disable' if settings['withdrawEnabled'] else '🟢 Enable'}", callback_data="as_toggle_withdraw", api_kwargs={"style": "success"})],
+            [InlineKeyboardButton(f"👥 Referral Commission ({commission}%)", callback_data="as_referral_commission", api_kwargs={"style": "danger"})],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
         ])
     )
 
@@ -2172,9 +2302,12 @@ async def cb_as_referral_commission(update: Update, context: ContextTypes.DEFAUL
     get_session(uid)["state"] = "admin_set_referral_commission"
     current = settings.get("referralCommission", 10)
     await query.edit_message_text(
-        f"👥 *Set Referral Commission*\n\nCurrent: *{current}%*\n\nSend new commission (0-50):",
+        f"👥 *Set Referral Commission*\n\n"
+        f"Current: *{current}%*\n\n"
+        f"Send new commission percentage (0-50):\n"
+        f"Example: `10` means 10%",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "success"})]])
     )
 
 async def cb_admin_referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2215,8 +2348,8 @@ async def cb_admin_referral_stats(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(
         msg, parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"⚙️ Set Commission ({commission}%)", callback_data="as_referral_commission")],
-            [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+            [InlineKeyboardButton(f"⚙️ Set Commission ({commission}%)", callback_data="as_referral_commission", api_kwargs={"style": "danger"})],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
         ])
     )
 
@@ -2230,7 +2363,7 @@ async def cb_as_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"📞 *Set Number Count*\n\nCurrent: *{settings['defaultNumberCount']}*\n\nSend new count (1-100):",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "success"})]])
     )
 
 async def cb_as_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2243,7 +2376,7 @@ async def cb_as_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"⏱ *Set Cooldown*\n\nCurrent: *{settings['cooldownSeconds']} seconds*\n\nSend new cooldown (1-3600):",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "danger"})]])
     )
 
 async def cb_as_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2256,7 +2389,7 @@ async def cb_as_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"💵 *Set Default OTP Price*\n\nCurrent: *{settings.get('defaultOtpPrice', 0.25):.2f} taka*\n\nSend new price:",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "primary"})]])
     )
 
 async def cb_as_minw(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2269,7 +2402,7 @@ async def cb_as_minw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"💸 *Set Min Withdraw*\n\nCurrent: *{settings['minWithdraw']} taka*\n\nSend new minimum:",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "success"})]])
     )
 
 async def cb_admin_add_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2282,7 +2415,7 @@ async def cb_admin_add_numbers(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(
         "➕ *Add Numbers*\n\nFormat:\n`[number]|[country code]|[service]`\n\nExample:\n`8801712345678|880|whatsapp`",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "danger"})]])
     )
 
 async def cb_admin_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2303,10 +2436,10 @@ async def cb_admin_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYP
     buttons = []
     for w in pending[:5]:
         buttons.append([
-            InlineKeyboardButton(f"✅ {w['id'][-6:]}", callback_data=f"wadm_approve:{w['id']}"),
-            InlineKeyboardButton(f"❌ {w['id'][-6:]}", callback_data=f"wadm_reject:{w['id']}"),
+            InlineKeyboardButton(f"✅ {w['id'][-6:]}", callback_data=f"wadm_approve:{w['id']}", api_kwargs={"style": "primary"}),
+            InlineKeyboardButton(f"❌ {w['id'][-6:]}", callback_data=f"wadm_reject:{w['id']}", api_kwargs={"style": "success"}),
         ])
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back")])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "danger"})])
 
     await query.edit_message_text(msg[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -2365,10 +2498,10 @@ async def cb_admin_balance_manage(update: Update, context: ContextTypes.DEFAULT_
         "👛 *Balance Management*\n\nSelect action:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Add Balance", callback_data="bal_add"),
-             InlineKeyboardButton("➖ Deduct Balance", callback_data="bal_deduct")],
-            [InlineKeyboardButton("🔄 Reset Balance", callback_data="bal_reset")],
-            [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+            [InlineKeyboardButton("➕ Add Balance", callback_data="bal_add", api_kwargs={"style": "primary"}),
+             InlineKeyboardButton("➖ Deduct Balance", callback_data="bal_deduct", api_kwargs={"style": "success"})],
+            [InlineKeyboardButton("🔄 Reset Balance", callback_data="bal_reset", api_kwargs={"style": "danger"})],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
         ])
     )
 
@@ -2382,7 +2515,7 @@ async def cb_bal_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "➕ *Add Balance*\n\nFormat: `[userId] [amount]`\nExample: `123456789 50`",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "success"})]])
     )
 
 async def cb_bal_deduct(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2395,7 +2528,7 @@ async def cb_bal_deduct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "➖ *Deduct Balance*\n\nFormat: `[userId] [amount]`",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "danger"})]])
     )
 
 async def cb_bal_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2408,7 +2541,7 @@ async def cb_bal_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "🔄 *Reset Balance*\n\nSend the userId:",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "primary"})]])
     )
 
 async def cb_admin_country_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2425,7 +2558,7 @@ async def cb_admin_country_prices(update: Update, context: ContextTypes.DEFAULT_
     text += "\nSend new prices (format: `880 0.50`):"
 
     await query.edit_message_text(text, parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "success"})]]))
 
 async def cb_admin_manage_countries(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2437,9 +2570,9 @@ async def cb_admin_manage_countries(update: Update, context: ContextTypes.DEFAUL
         f"🌍 *Manage Countries*\n\nTotal: *{len(countries)}*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Add Country", callback_data="country_add"),
-             InlineKeyboardButton("📋 List Countries", callback_data="country_list")],
-            [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+            [InlineKeyboardButton("➕ Add Country", callback_data="country_add", api_kwargs={"style": "danger"}),
+             InlineKeyboardButton("📋 List Countries", callback_data="country_list", api_kwargs={"style": "primary"})],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "success"})],
         ])
     )
 
@@ -2451,7 +2584,7 @@ async def cb_country_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p = country_prices.get(cc, settings.get("defaultOtpPrice", 0.25))
         text += f"{c['flag']} *{c['name']}* (+{cc}) — {p:.2f} TK/OTP\n"
     await query.edit_message_text(text[:4000], parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_manage_countries")]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_manage_countries", api_kwargs={"style": "danger"})]]))
 
 async def cb_country_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2461,7 +2594,7 @@ async def cb_country_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "🌍 *Add Country*\n\nFormat: `[code] [name] [flag]`\nExample: `880 Bangladesh 🇧🇩`",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "primary"})]])
     )
 
 async def cb_admin_manage_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2474,9 +2607,9 @@ async def cb_admin_manage_services(update: Update, context: ContextTypes.DEFAULT
         "🔧 *Manage Services*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 List Services", callback_data="svc_list"),
-             InlineKeyboardButton("➕ Add Service", callback_data="svc_add")],
-            [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+            [InlineKeyboardButton("📋 List Services", callback_data="svc_list", api_kwargs={"style": "success"}),
+             InlineKeyboardButton("➕ Add Service", callback_data="svc_add", api_kwargs={"style": "danger"})],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
         ])
     )
 
@@ -2487,7 +2620,7 @@ async def cb_svc_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for svc_id, svc in services.items():
         text += f"• {svc['icon']} *{svc['name']}* (ID: `{svc_id}`)\n"
     await query.edit_message_text(text, parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_manage_services")]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_manage_services", api_kwargs={"style": "success"})]]))
 
 async def cb_svc_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2497,7 +2630,7 @@ async def cb_svc_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "🔧 *Add Service*\n\nFormat: `[id] [name] [icon]`\nExample: `facebook Facebook 📘`",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "danger"})]])
     )
 
 async def cb_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2509,9 +2642,9 @@ async def cb_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess = get_session(uid)
     sess["state"] = "admin_upload_select_service"
 
-    buttons = [[InlineKeyboardButton(f"{svc['icon']} {svc['name']}", callback_data=f"upload_svc:{svc_id}")]
+    buttons = [[InlineKeyboardButton(f"{svc['icon']} {svc['name']}", callback_data=f"upload_svc:{svc_id}", api_kwargs={"style": "primary"})]
                for svc_id, svc in services.items()]
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")])
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "success"})])
     await query.edit_message_text("📤 *Upload Numbers*\n\nSelect service:", parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -2527,7 +2660,7 @@ async def cb_upload_svc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"📤 *Upload Numbers for {svc['name']}*\n\nSend a .txt file with numbers (one per line).",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_cancel", api_kwargs={"style": "danger"})]])
     )
 
 async def cb_admin_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2545,7 +2678,7 @@ async def cb_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_session(uid)["state"] = None
     get_session(uid)["data"]  = None
     await query.edit_message_text("❌ *Cancelled.*", parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛠 Back to Admin", callback_data="admin_back")]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛠 Back to Admin", callback_data="admin_back", api_kwargs={"style": "primary"})]]))
 
 async def cb_admin_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2569,9 +2702,9 @@ async def cb_admin_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if nums:
                 buttons.append([InlineKeyboardButton(
                     f"🗑️ +{cc}/{svc_id} ({len(nums)})",
-                    callback_data=f"del_confirm:{cc}:{svc_id}"
+                    callback_data=f"del_confirm:{cc}:{svc_id}", api_kwargs={"style": "primary"}
                 )])
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="admin_back")])
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="admin_back", api_kwargs={"style": "success"})])
     await query.edit_message_text("🗑️ *Delete Numbers*\n\nSelect to delete:", parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -2587,8 +2720,8 @@ async def cb_del_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚠️ *Confirm Deletion*\n\nDelete {count} numbers from +{cc}/{svc_id}?",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Yes", callback_data=f"del_exec:{cc}:{svc_id}"),
-             InlineKeyboardButton("❌ No", callback_data="admin_back")],
+            [InlineKeyboardButton("✅ Yes", callback_data=f"del_exec:{cc}:{svc_id}", api_kwargs={"style": "danger"}),
+             InlineKeyboardButton("❌ No", callback_data="admin_back", api_kwargs={"style": "primary"})],
         ])
     )
 
@@ -2606,7 +2739,7 @@ async def cb_del_exec(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del numbers_by_cs[cc]
     await async_save_numbers()
     await query.edit_message_text(f"✅ *Deleted {count} numbers.*", parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "success"})]]))
 
 async def cb_goto_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2653,6 +2786,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         added += 1
                     break
         except Exception as e:
+            logger.error(f"XLSX parse error: {e}")
             return await update.message.reply_text(f"❌ Excel file read error: {e}")
     else:
         raw_content = await file.download_as_bytearray()
@@ -2712,10 +2846,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(phone) < 10 or len(phone) > 15:
             return await update.message.reply_text("❌ Invalid number. Example: `8801712345678`", parse_mode="Markdown")
 
-        loading = await update.message.reply_text("⏳ *Pairing code নিচ্ছে...*", parse_mode="Markdown")
+        loading = await update.message.reply_text(
+            "⏳ *Pairing code নিচ্ছে...*\n\n⌛ কয়েক সেকেন্ড অপেক্ষা করো।",
+            parse_mode="Markdown"
+        )
 
         async def wa_task():
             try:
+                # আগে check করো connected কিনা
                 current_state = await green_get_state(uid)
                 if current_state == "authorized":
                     wa_sessions[uid] = {"connected": True}
@@ -2723,11 +2861,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except: pass
                     await context.bot.send_message(
                         uid,
-                        "✅ *WhatsApp Already Connected!*",
+                        "✅ *WhatsApp Already Connected!*\n\n"
+                        "🟢 তোমার WhatsApp ইতিমধ্যে connected আছে।",
                         parse_mode="Markdown",
                         reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔴 Logout", callback_data="wa_disconnect")],
-                            [InlineKeyboardButton("📊 Check Status", callback_data="wa_status")],
+                            [InlineKeyboardButton("🔴 Logout / Disconnect", callback_data="wa_disconnect", api_kwargs={"style": "danger"})],
+                            [InlineKeyboardButton("📊 Check Status", callback_data="wa_status", api_kwargs={"style": "primary"})],
                         ])
                     )
                     return
@@ -2739,7 +2878,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except: pass
                 await context.bot.send_message(
                     uid,
-                    f"🔑 *Pairing Code*\n\n`{formatted}`\n\n"
+                    f"🔑 *Pairing Code*\n\n"
+                    f"`{formatted}`\n\n"
+                    f"📋 *Steps:*\n"
                     f"1. WhatsApp খোলো\n"
                     f"2. Settings → Linked Devices\n"
                     f"3. Link a Device → *Link with phone number*\n"
@@ -2747,19 +2888,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ Code enter করার পর *Check Status* চাপো।",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ Check Status", callback_data="wa_status")],
-                        [InlineKeyboardButton("🔄 New Code", callback_data="wa_connect")],
+                        [InlineKeyboardButton("✅ Check Status", callback_data="wa_status", api_kwargs={"style": "danger"})],
+                        [InlineKeyboardButton("🔄 New Code", callback_data="wa_connect", api_kwargs={"style": "primary"})],
                     ])
                 )
                 asyncio.create_task(monitor_wa_connection(uid, context))
             except Exception as e:
                 try: await loading.delete()
                 except: pass
+                logger.error(f"WA error: {e}", exc_info=True)
                 await context.bot.send_message(
                     uid,
-                    f"❌ *Connection failed:* {str(e)[:150]}",
+                    f"❌ *Connection failed:* {str(e)[:150]}\n\nকিছুক্ষণ পর আবার try করো।",
                     parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", callback_data="wa_connect")]])
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", callback_data="wa_connect", api_kwargs={"style": "success"})]])
                 )
 
         asyncio.create_task(wa_task())
@@ -2777,15 +2919,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             result = generate_totp(text)
         except Exception as e:
+            logger.error(f"TOTP exception uid={uid}: {e}")
             result = None
 
         if not result:
             await update.message.reply_text(
-                "❌ *Invalid secret key!*\n\nExample format: `JBSWY3DPEHPK3PXP`",
+                "❌ *Invalid secret key!*\n\n"
+                "Key টি সঠিক নয়। Authenticator app থেকে exact secret key copy করো।\n"
+                "Example format: `JBSWY3DPEHPK3PXP`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Try Again", callback_data=f"totp:{svc}")],
-                    [InlineKeyboardButton("🔙 Back", callback_data="totp_back")],
+                    [InlineKeyboardButton("🔄 Try Again", callback_data=f"totp:{svc}", api_kwargs={"style": "danger"})],
+                    [InlineKeyboardButton("🔙 Back", callback_data="totp_back", api_kwargs={"style": "primary"})],
                 ])
             )
             return
@@ -2807,11 +2952,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏰ *{result['timeRemaining']} seconds remaining*",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Refresh Code", callback_data=cb_data)],
-                    [InlineKeyboardButton("🔙 Back", callback_data="totp_back")],
+                    [InlineKeyboardButton("🔄 Refresh Code", callback_data=cb_data, api_kwargs={"style": "success"})],
+                    [InlineKeyboardButton("🔙 Back", callback_data="totp_back", api_kwargs={"style": "danger"})],
                 ])
             )
         except Exception as e:
+            logger.error(f"TOTP reply error uid={uid}: {e}")
             await update.message.reply_text(f"✅ 2FA Code: {result['token']} (⏰ {result['timeRemaining']}s)")
         return
 
@@ -2836,8 +2982,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💵 Amount: *{amount:.2f} taka*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Confirm", callback_data="w_confirm"),
-                 InlineKeyboardButton("❌ Cancel", callback_data="w_cancel")],
+                [InlineKeyboardButton("✅ Confirm", callback_data="w_confirm", api_kwargs={"style": "primary"}),
+                 InlineKeyboardButton("❌ Cancel", callback_data="w_cancel", api_kwargs={"style": "success"})],
             ])
         )
         return
@@ -2849,7 +2995,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if 0 <= val <= 50:
                 settings["referralCommission"] = val
                 save_settings()
-                await update.message.reply_text(f"✅ *Referral commission set to {val:.1f}%*", parse_mode="Markdown")
+                await update.message.reply_text(
+                    f"✅ *Referral commission set to {val:.1f}%*\n\n"
+                    f"এখন থেকে প্রতি OTP এর {val:.1f}% commission referrer পাবে।",
+                    parse_mode="Markdown"
+                )
             else:
                 await update.message.reply_text("❌ 0 থেকে 50 এর মধ্যে দাও।")
         except:
@@ -2873,9 +3023,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_global_wa()
             await loading.delete()
             await update.message.reply_text(
-                f"📱 *Global WhatsApp Pairing Code:*\n\n`{code}`\n\nWhatsApp → Linked Devices → Link a Device → Enter code",
+                f"📱 *Global WhatsApp Pairing Code:*\n\n"
+                f"`{code}`\n\n"
+                f"WhatsApp → Linked Devices → Link a Device → Enter code",
                 parse_mode="Markdown"
             )
+            # verify loop
             async def verify_global_wa():
                 for _ in range(20):
                     await asyncio.sleep(15)
@@ -2888,7 +3041,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         try:
                             await context.bot.send_message(
                                 int(uid),
-                                "✅ *Global WhatsApp Connected!*",
+                                "✅ *Global WhatsApp Connected!*\n\n"
+                                "এখন সব user এর number এই WA দিয়ে check হবে।",
                                 parse_mode="Markdown"
                             )
                         except: pass
@@ -3112,7 +3266,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"{icon} *{method} — {amount:.2f} taka*\n\n📱 Your {method} number:",
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="w_cancel")]])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="w_cancel", api_kwargs={"style": "danger"})]])
             )
         except:
             pass
@@ -3173,8 +3327,11 @@ async def handle_otp_group_message(update: Update, context: ContextTypes.DEFAULT
     if not msg_text:
         return
 
+    logger.info(f"📨 OTP Group [{msg_id}]: {msg_text[:120]}")
+    logger.info(f"🔍 Active numbers count: {len(active_numbers)}")
     matched = find_matching_active_number(msg_text)
     if not matched:
+        logger.warning(f"⚠️ No active number matched for msg: {msg_text[:200]}")
         return
 
     data = active_numbers[matched]
@@ -3221,6 +3378,7 @@ async def handle_otp_group_message(update: Update, context: ContextTypes.DEFAULT
 REQUIRED_GROUP_IDS = {MAIN_CHANNEL_ID, CHAT_GROUP_ID, OTP_GROUP_ID}
 
 async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """কেউ group ছাড়লে বা join করলে real-time এ handle করো"""
     try:
         cm = update.chat_member
         if not cm:
@@ -3232,20 +3390,25 @@ async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAUL
 
         user    = cm.new_chat_member.user
         uid     = str(user.id)
-        old_status = cm.old_chat_member.status
-        new_status = cm.new_chat_member.status
+        old_status = cm.old_chat_member.status  # আগের status
+        new_status = cm.new_chat_member.status  # নতুন status
 
         LEFT_STATUSES   = {"left", "kicked", "banned"}
         JOINED_STATUSES = {"member", "administrator", "creator"}
 
+        # ── কেউ group ছেড়ে গেলে ──
         if old_status in JOINED_STATUSES and new_status in LEFT_STATUSES:
+            logger.info(f"👋 User {uid} left chat {chat_id}")
+
             if uid not in users:
                 return
 
+            # verified=False করো — referral ছাড়া user হলেও
             users[uid]["verified"] = False
             sess = get_session(uid)
             sess["verified"] = False
 
+            # referral ছিল এবং confirmed ছিল → count কমাও
             if users[uid].get("referralVerified", False):
                 users[uid]["referralVerified"] = False
                 referrer_id = users[uid].get("referredBy")
@@ -3254,16 +3417,24 @@ async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAUL
                     if referrer_id in referrals and uid in referrals[referrer_id]:
                         referrals[referrer_id].remove(uid)
                     await async_save_referrals()
+                    logger.info(f"📉 Referral removed: uid={uid} left → referrer={referrer_id} count={users[referrer_id]['referralCount']}")
                     try:
                         await context.bot.send_message(
                             int(referrer_id),
-                            f"⚠️ *Referral Lost!*\n\nতোমার একজন referred user group ছেড়ে গেছে।",
+                            f"⚠️ *Referral Lost!*\n\n"
+                            f"তোমার একজন referred user group ছেড়ে গেছে।\n"
+                            f"👥 Current Referrals: *{users[referrer_id]['referralCount']}*",
                             parse_mode="Markdown"
                         )
                     except:
                         pass
 
             await async_save_users()
+            logger.info(f"🔒 Access revoked for uid={uid} (left chat {chat_id})")
+
+        # ── কেউ আবার group এ join করলে — শুধু log করো, verify এ count হবে ──
+        elif old_status in LEFT_STATUSES and new_status in JOINED_STATUSES:
+            logger.info(f"✅ User {uid} joined chat {chat_id}")
 
     except Exception as e:
         logger.error(f"handle_chat_member_update error: {e}")
@@ -3281,36 +3452,62 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Periodic scheduled check ───
 async def scheduled_membership_check(app):
     while True:
-        await asyncio.sleep(30 * 60)
+        await asyncio.sleep(30 * 60)  # ৩০ মিনিট পর পর background check
         if not settings.get("requireVerification", True):
             continue
+        logger.info(f"🔄 [Scheduled] Checking {len(users)} users...")
+        blocked = 0
         for uid, user in list(users.items()):
             try:
                 membership = await check_membership(int(uid), app)
                 if not membership["allJoined"]:
                     users[uid]["verified"] = False
+                    blocked += 1
                     sess = get_session(uid)
                     sess["verified"] = False
 
+                    # ── রেফার কাউন্ট কমাও যদি আগে verified ছিল ──
                     if users[uid].get("referralVerified", False):
                         users[uid]["referralVerified"] = False
                         referrer_id = users[uid].get("referredBy")
                         if referrer_id and referrer_id in users:
-                            users[referrer_id]["referralCount"] = max(0, users[referrer_id].get("referralCount", 0) - 1)
+                            current_count = users[referrer_id].get("referralCount", 0)
+                            users[referrer_id]["referralCount"] = max(0, current_count - 1)
+                            # referrals list থেকেও সরাও
                             if referrer_id in referrals and uid in referrals[referrer_id]:
                                 referrals[referrer_id].remove(uid)
                             await async_save_referrals()
+                            logger.info(f"📉 Referral removed: uid={uid} left group → referrer={referrer_id} count={users[referrer_id]['referralCount']}")
+                            try:
+                                await app.bot.send_message(
+                                    int(referrer_id),
+                                    f"⚠️ *Referral Lost!*\n\n"
+                                    f"তোমার একজন referred user group ছেড়ে গেছে।\n"
+                                    f"👥 Current Referrals: *{users[referrer_id]['referralCount']}*",
+                                    parse_mode="Markdown"
+                                )
+                            except:
+                                pass
+
+                    try:
+                        pass  # message পাঠানো বন্ধ
+                    except:
+                        pass
                 else:
                     users[uid]["verified"] = True
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Scheduled check error for {uid}: {e}")
         await async_save_users()
+        logger.info(f"✅ [Scheduled] {blocked} users blocked.")
 
-# ─── OTP Panel System ───
+# ═══════════════════════════════════════════════
+# ─── OTP Panel Scraping System ───
+# ═══════════════════════════════════════════════
+
 PANELS_FILE     = os.path.join(DATA_DIR, "panels.json")
-otp_panel_tasks   = {}
-otp_panel_status  = {}
+otp_panel_tasks   = {}   # { index: asyncio.Task }
+otp_panel_status  = {}   # { index: "running" | "stopped" | "error" }
 otp_seen_ids      = set()
 
 def load_panels() -> list:
@@ -3341,15 +3538,20 @@ def scraper_detect_service(message: str, range_name: str = "") -> str:
     for svc, pat in {
         'whatsapp': r'whatsapp|واتساب', 'telegram': r'telegram',
         'facebook': r'facebook|fb\.com', 'instagram': r'instagram',
-        'google':   r'google|gmail',
+        'google':   r'google|gmail',     'microsoft': r'microsoft|outlook',
+        'twitter':  r'twitter|x\.com',   'tiktok':    r'tiktok',
+        'snapchat': r'snapchat',
     }.items():
         if re.search(pat, combined, re.IGNORECASE):
             return svc
     return "other"
 
 async def panel_login(session, url: str, username: str, password: str) -> bool:
+    """Auto-detect panel type and login"""
+    # ── Masdar panel (ints/login) ──
     if await _masdar_login(session, url, username, password):
         return True
+    # ── IMS panel (login) ──
     if await _ims_login(session, url, username, password):
         return True
     return False
@@ -3375,9 +3577,11 @@ async def _masdar_login(session, url: str, username: str, password: str) -> bool
             allow_redirects=True, ssl=False, timeout=15
         ) as r:
             if "login" not in str(r.url).lower():
+                logger.info(f"✅ Masdar login OK: {url}")
                 return True
             return False
     except Exception as e:
+        logger.debug(f"Masdar login failed {url}: {e}")
         return False
 
 async def _ims_login(session, url: str, username: str, password: str) -> bool:
@@ -3388,25 +3592,30 @@ async def _ims_login(session, url: str, username: str, password: str) -> bool:
             if r.status != 200: return False
             text = await r.text()
             soup = _BS(text, "html.parser")
+            # captcha
             capt = "5"
             math = re.search(r'(\d+)\s*([\+\-])\s*(\d+)', text)
             if math:
                 a, op, b = int(math.group(1)), math.group(2), int(math.group(3))
                 capt = str(a + b) if op == '+' else str(a - b)
+            # etkk token
             etkk_input = soup.find("input", {"name": "etkk"})
             etkk_val   = etkk_input.get("value", "") if etkk_input else ""
 
         async with session.post(
             f"{url}/signin",
             data={"etkk": etkk_val, "username": username, "password": password, "capt": capt},
-            headers={"Content-Type": "application/x-www-form-urlencoded", "Referer": login_url},
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Referer": login_url},
             allow_redirects=True, ssl=False, timeout=15
         ) as r:
             text = await r.text()
             if username in text or "CDR" in text or "dashboard" in str(r.url).lower():
+                logger.info(f"✅ IMS login OK: {url}")
                 return True
             return False
     except Exception as e:
+        logger.debug(f"IMS login failed {url}: {e}")
         return False
 
 async def panel_fetch_sms(session, url: str, panel_type: str = "masdar_client") -> list:
@@ -3438,7 +3647,8 @@ async def panel_fetch_sms(session, url: str, panel_type: str = "masdar_client") 
     try:
         async with session.get(
             url + cfg["path"], params=params, ssl=False, timeout=15,
-            headers={"X-Requested-With": "XMLHttpRequest", "Referer": url + cfg["ref"]}
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Referer": url + cfg["ref"]}
         ) as r:
             if r.status != 200: return []
             data   = json.loads(await r.text())
@@ -3457,30 +3667,110 @@ async def panel_fetch_sms(session, url: str, panel_type: str = "masdar_client") 
                     })
             return result
     except Exception as e:
+        logger.error(f"❌ fetch_sms error {url}: {e}")
         return []
+
+async def _masdar_fetch(session, url: str):
+    try:
+        now  = datetime.now()
+        s_dt = now.strftime('%Y-%m-%d') + '%2000:00:00'
+        e_dt = now.strftime('%Y-%m-%d') + '%2023:59:59'
+        ts   = int(time.time() * 1000)
+        api  = (
+            f"{url}/ints/client/res/data_smscdr.php?"
+            f"fdate1={s_dt}&fdate2={e_dt}&frange=&fnum=&fcli=&fg=0&"
+            f"sEcho=1&iColumns=7&sColumns=%2C%2C%2C%2C%2C%2C&"
+            f"iDisplayStart=0&iDisplayLength=100&"
+            f"mDataProp_0=0&mDataProp_1=1&mDataProp_2=2&"
+            f"mDataProp_3=3&mDataProp_4=4&mDataProp_5=5&mDataProp_6=6&"
+            f"sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=desc&iSortingCols=1&_={ts}"
+        )
+        async with session.get(api, ssl=False, timeout=15,
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Referer": f"{url}/ints/client/SMSCDRStats"}) as r:
+            if r.status != 200: return None
+            data = json.loads(await r.text())
+            result = []
+            for item in data.get("aaData", []):
+                if not isinstance(item, list) or len(item) < 5: continue
+                if isinstance(item[0], str) and item[0].startswith('0,0,0,0'): continue
+                otp = scraper_extract_otp(str(item[4]))
+                if otp:
+                    result.append({
+                        "timestamp": str(item[0]),
+                        "number":    re.sub(r"\D", "", str(item[2])),
+                        "range":     str(item[1]),
+                        "message":   str(item[4]),
+                        "otp":       otp,
+                    })
+            return result
+    except:
+        return None
+
+async def _ims_fetch(session, url: str):
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+        ts    = int(time.time() * 1000)
+        params = {
+            "fdate1": f"{today} 00:00:00",
+            "fdate2": f"{today} 23:59:59",
+            "frange": "", "fnum": "", "fcli": "", "fg": "0",
+            "sEcho": "1", "iColumns": "9",
+            "iDisplayStart": "0", "iDisplayLength": "100",
+            "mDataProp_0": "0", "mDataProp_1": "1", "mDataProp_2": "2",
+            "mDataProp_3": "3", "mDataProp_4": "4", "mDataProp_5": "5",
+            "mDataProp_6": "6", "mDataProp_7": "7", "mDataProp_8": "8",
+            "sSearch": "", "bRegex": "false",
+            "iSortCol_0": "0", "sSortDir_0": "desc", "iSortingCols": "1",
+            "_": ts
+        }
+        api = f"{url}/agent/res/data_smscdr.php"
+        async with session.get(api, params=params, ssl=False, timeout=15,
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Referer": f"{url}/agent/SMSCDRReports"}) as r:
+            if r.status != 200: return None
+            data = json.loads(await r.text())
+            result = []
+            for item in data.get("aaData", []):
+                if not isinstance(item, list) or len(item) < 6: continue
+                otp = scraper_extract_otp(str(item[5]))
+                if otp:
+                    result.append({
+                        "timestamp": str(item[0]),
+                        "number":    re.sub(r"\D", "", str(item[2])),
+                        "range":     str(item[1]),
+                        "message":   str(item[5]),
+                        "otp":       otp,
+                    })
+            return result
+    except:
+        return None
 
 async def run_panel(panel: dict, idx: int, app):
     import aiohttp as _aio
     url      = panel["url"].rstrip("/")
     username = panel["username"]
     password = panel["password"]
+    logger.info(f"🚀 Panel #{idx+1} started: {url}")
     otp_panel_status[idx] = "running"
 
     async with _aio.ClientSession(
-        headers={"User-Agent": "Mozilla/5.0"},
+        headers={"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest"},
         cookie_jar=_aio.CookieJar(unsafe=True)
     ) as session:
         last_login    = 0
         fail_count    = 0
-        previous_otps = set()
+        previous_otps = set()  # এই run এ যা পাঠিয়েছি
         while True:
             try:
+                # ── Login / Re-login ──
                 if time.time() - last_login > 540:
                     ok = await panel_login(session, url, username, password)
                     if not ok:
                         fail_count += 1
                         if fail_count >= 3:
                             otp_panel_status[idx] = "error"
+                            logger.error(f"❌ Panel #{idx+1} login failed 3 times, stopping.")
                             return
                         await asyncio.sleep(60)
                         continue
@@ -3488,6 +3778,7 @@ async def run_panel(panel: dict, idx: int, app):
                     fail_count = 0
                     otp_panel_status[idx] = "running"
 
+                # ── SMS Fetch ──
                 sms_list = await panel_fetch_sms(session, url, panel.get("type", "masdar_client"))
 
                 for sms in sms_list:
@@ -3495,9 +3786,11 @@ async def run_panel(panel: dict, idx: int, app):
                     if otp_id in previous_otps:
                         continue
                     previous_otps.add(otp_id)
+                    # memory limit
                     if len(previous_otps) > 50000:
                         previous_otps = set(list(previous_otps)[-20000:])
 
+                    # ── active_numbers fresh reload ──
                     fresh_active = load_json(ACTIVE_NUMBERS_FILE, {})
                     if fresh_active and set(fresh_active.keys()) != set(active_numbers.keys()):
                         active_numbers.clear()
@@ -3531,6 +3824,7 @@ async def run_panel(panel: dict, idx: int, app):
 
                     try:
                         await app.bot.send_message(int(uid), notify, parse_mode="Markdown")
+                        logger.info(f"✅ OTP sent to user: +{matched} → uid={uid} otp={sms['otp']}")
                     except Exception as e:
                         logger.error(f"❌ notify error uid={uid}: {e}")
 
@@ -3542,12 +3836,13 @@ async def run_panel(panel: dict, idx: int, app):
                         "timestamp": datetime.now().isoformat()
                     })
                     await async_save_otp_log()
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.3)  # Telegram rate limit এর জন্য ছোট delay
 
                 await asyncio.sleep(1)
 
             except asyncio.CancelledError:
                 otp_panel_status[idx] = "stopped"
+                logger.info(f"⏹️ Panel #{idx+1} stopped")
                 return
             except Exception as e:
                 otp_panel_status[idx] = "error"
@@ -3555,13 +3850,14 @@ async def run_panel(panel: dict, idx: int, app):
                 await asyncio.sleep(30)
 
 def start_all_panels(app):
-    rebuild_suffix_index()
+    rebuild_suffix_index()  # startup এ index তৈরি করো
     panels = load_panels()
     for i, p in enumerate(panels):
         if i not in otp_panel_tasks or otp_panel_tasks[i].done():
             otp_panel_tasks[i] = asyncio.create_task(run_panel(p, i, app))
     logger.info(f"📡 {len(panels)} panel(s) started")
 
+# ── Admin Panel Callbacks ──
 PANEL_TYPE_LABEL = {
     "masdar_client": "Masdar Client",
     "masdar_agent":  "Masdar Agent",
@@ -3585,10 +3881,10 @@ async def cb_admin_panels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label = PANEL_TYPE_LABEL.get(p.get('type', ''), p.get('type', ''))
         msg += f"*{i+1}.* `{p['url']}`\n👤 `{p['username']}` | 🏷️ {label} | {icon}\n\n"
     await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add Panel", callback_data="panel_add:auto")],
-        [InlineKeyboardButton("🗑️ Delete Panel", callback_data="panel_del"),
-         InlineKeyboardButton("🔄 Restart All",  callback_data="panel_restart")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+        [InlineKeyboardButton("➕ Add Panel", callback_data="panel_add:auto", api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("🗑️ Delete Panel", callback_data="panel_del", api_kwargs={"style": "danger"}),
+         InlineKeyboardButton("🔄 Restart All",  callback_data="panel_restart", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
     ]))
 
 async def cb_admin_global_wa(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3609,7 +3905,8 @@ async def cb_admin_global_wa(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"📱 *Global WhatsApp System*\n\n"
         f"*Status:* {status_icon} {'Connected' if connected else 'Disconnected'}\n"
         f"*Phone:* `{phone}`\n"
-        f"*WA Check:* {toggle_icon}"
+        f"*WA Check:* {toggle_icon}\n\n"
+        f"একটা WhatsApp connect করলে সব user এর number check হবে।"
     )
 
     buttons = []
@@ -3617,14 +3914,15 @@ async def cb_admin_global_wa(update: Update, context: ContextTypes.DEFAULT_TYPE)
         buttons.append([
             InlineKeyboardButton(
                 f"{'🔴 Disable' if enabled else '🟢 Enable'} WA Check",
-                callback_data="global_wa_toggle"
+                callback_data="global_wa_toggle",
+                api_kwargs={"style": "success" if not enabled else "danger"}
             ),
-            InlineKeyboardButton("🔌 Disconnect", callback_data="global_wa_disconnect")
+            InlineKeyboardButton("🔌 Disconnect", callback_data="global_wa_disconnect", api_kwargs={"style": "danger"})
         ])
     else:
-        buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="global_wa_connect")])
+        buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="global_wa_connect", api_kwargs={"style": "primary"})])
 
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back")])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})])
     await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def cb_global_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3633,9 +3931,13 @@ async def cb_global_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     get_session(uid)["state"] = "global_wa_phone"
     await query.edit_message_text(
-        "📱 *Global WhatsApp Connect*\n\nWhatsApp নম্বর দাও (country code সহ):\nExample: `8801712345678`",
+        "📱 *Global WhatsApp Connect*\n\n"
+        "WhatsApp নম্বর দাও (country code সহ):\n"
+        "Example: `8801712345678`",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_global_wa")]])
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Cancel", callback_data="admin_global_wa", api_kwargs={"style": "danger"})
+        ]])
     )
 
 async def cb_global_wa_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3643,6 +3945,8 @@ async def cb_global_wa_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     global_wa_data["enabled"] = not global_wa_data.get("enabled", False)
     save_global_wa()
+    status = "✅ চালু" if global_wa_data["enabled"] else "❌ বন্ধ"
+    await query.answer(f"Global WA Check {status}", show_alert=True)
     await cb_admin_global_wa(update, context)
 
 async def cb_global_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3655,7 +3959,35 @@ async def cb_global_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_
     global_wa_data["phone"]     = ""
     global_wa_data["enabled"]   = False
     save_global_wa()
+    await query.answer("🔌 Global WA Disconnected", show_alert=True)
     await cb_admin_global_wa(update, context)
+
+# ─── Global WA handle_text ───
+# (handle_text এ state "global_wa_phone" handle করা হবে)
+    query = update.callback_query
+    uid   = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("❌ Admin only")
+    await query.answer()
+    panels = load_panels()
+    msg = f"📡 *OTP Panels*\n\nTotal: *{len(panels)}*\n\n"
+    for i, p in enumerate(panels):
+        status = otp_panel_status.get(i, "stopped")
+        if status == "running":
+            icon = "🟢 Running"
+        elif status == "error":
+            icon = "🔴 Login Failed"
+        else:
+            icon = "⚫ Stopped"
+        label = PANEL_TYPE_LABEL.get(p.get('type', ''), p.get('type', ''))
+        msg += f"*{i+1}.* `{p['url']}`\n👤 `{p['username']}` | 🏷️ {label} | {icon}\n\n"
+
+    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Panel", callback_data="panel_add:auto", api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("🗑️ Delete Panel", callback_data="panel_del", api_kwargs={"style": "danger"}),
+         InlineKeyboardButton("🔄 Restart All",  callback_data="panel_restart", api_kwargs={"style": "success"})],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_back", api_kwargs={"style": "primary"})],
+    ]))
 
 async def cb_panel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -3666,9 +3998,13 @@ async def cb_panel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_session(uid)["panel_type"] = ptype
     label = PANEL_TYPE_LABEL.get(ptype, ptype)
     await query.edit_message_text(
-        f"➕ *Add {label} Panel*\n\nFormat: `URL username password`\n\nExample:\n`http://139.99.69.196 admin admin123`",
+        f"➕ *Add {label} Panel*\n\n"
+        f"Format: `URL username password`\n\n"
+        f"Example:\n`http://139.99.69.196 admin admin123`",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="admin_panels")]])
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Cancel", callback_data="admin_panels", api_kwargs={"style": "danger"})
+        ]])
     )
 
 async def cb_panel_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3680,7 +4016,7 @@ async def cb_panel_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_panels")]]))
     buttons = [[InlineKeyboardButton(f"🗑️ {i+1}. {p['url']}", callback_data=f"panel_del_confirm:{i}")]
                for i, p in enumerate(panels)]
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panels")])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panels", api_kwargs={"style": "primary"})])
     await query.edit_message_text("🗑️ *কোন panel delete করবে?*", parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -3807,6 +4143,7 @@ def main():
     app.add_handler(MessageHandler(filters.Chat(OTP_GROUP_ID) & ~filters.COMMAND, handle_otp_group_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
 
+    # ── Real-time group member change (leave/join) ──
     from telegram.ext import ChatMemberHandler
     app.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
 
@@ -3816,11 +4153,16 @@ def main():
         asyncio.create_task(scheduled_membership_check(application))
         asyncio.create_task(green_api_monitor(application))
         await start_http_server()
-        start_all_panels(application)
+        start_all_panels(application)  # ── OTP Panels শুরু করো ──
 
     app.post_init = post_init
 
-    logger.info("🚀 Starting Earning Hub Bot...")
+    logger.info("="*50)
+    logger.info("🚀 Starting Earning Hub Bot (Python)...")
+    logger.info(f"📢 Main Channel: {MAIN_CHANNEL_ID}")
+    logger.info(f"💬 Chat Group: {CHAT_GROUP_ID}")
+    logger.info(f"📨 OTP Group: {OTP_GROUP_ID}")
+    logger.info("="*50)
 
     app.run_polling(allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"])
 
