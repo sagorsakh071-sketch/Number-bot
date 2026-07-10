@@ -15,6 +15,4 @@ RUN npm install
 
 COPY . .
 
-RUN chmod +x start.sh
-
 CMD ["bash", "start.sh"]
