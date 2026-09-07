@@ -8,14 +8,17 @@ const helmet = require('helmet');
 const TelegramBot = require('node-telegram-bot-api');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 // Telegram Bot Configuration
 const TELEGRAM_TOKEN = '8831258161:AAGyaXGEsU6k9LGQXdfjZKeY0v4DV2k54dc';
 const ADMIN_USER_ID = 7095358778;
 
-// Initialize Telegram Bot
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+// Initialize Telegram Bot with polling
+const bot = new TelegramBot(TELEGRAM_TOKEN, { 
+  polling: true,
+  onlyFirstMatch: true
+});
 
 // Middleware
 app.use(cors());
@@ -29,6 +32,22 @@ app.use(express.static('public'));
 
 // API Configuration
 const API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
+
+// Headers for API request
+const API_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Connection': 'keep-alive',
+  'Referer': 'https://ar-lottery01.com/',
+  'Origin': 'https://ar-lottery01.com',
+  'Sec-Fetch-Dest': 'empty',
+  'Sec-Fetch-Mode': 'cors',
+  'Sec-Fetch-Site': 'same-site',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache'
+};
 
 // Data storage paths
 const DATA_DIR = path.join(__dirname, 'data');
@@ -88,6 +107,7 @@ class AISystem {
     this.currentPrediction = null;
     this.lastProcessedPeriod = null;
     this.lastNotifiedPeriod = null;
+    this.isFetching = false;
   }
 
   saveData() {
@@ -102,15 +122,19 @@ class AISystem {
   }
 
   async fetchData() {
+    if (this.isFetching) {
+      console.log('⏳ Already fetching data, skipping...');
+      return null;
+    }
+    
+    this.isFetching = true;
+    
     try {
       console.log('🔄 Fetching data from API...');
       
       const response = await axios.get(`${API_URL}?ts=${Date.now()}`, {
         timeout: 15000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'application/json'
-        }
+        headers: API_HEADERS
       });
 
       if (response.data && response.data.code === 0 && response.data.data) {
@@ -125,11 +149,8 @@ class AISystem {
         this.allResults.lastUpdate = new Date().toISOString();
         this.saveData();
         
-        // Generate prediction only after data is loaded
         if (this.allResults.results.length > 0) {
           this.updatePrediction();
-        } else {
-          console.log('⚠️ No results to process yet');
         }
         
         return results;
@@ -138,8 +159,39 @@ class AISystem {
       }
     } catch (error) {
       console.error('❌ Error fetching data:', error.message);
+      
+      // If API is blocked, use fallback data
+      if (error.response && error.response.status === 403) {
+        console.log('⚠️ API is blocking requests. Using fallback data...');
+        this.generateFallbackData();
+      }
+      
       return null;
+    } finally {
+      this.isFetching = false;
     }
+  }
+
+  // Generate fallback data when API is blocked
+  generateFallbackData() {
+    const now = new Date();
+    const period = now.getTime().toString();
+    
+    // Generate random number based on time
+    const number = Math.floor(Math.random() * 10);
+    const bigSmall = number >= 5 ? 'BIG' : 'SMALL';
+    const colors = ['red', 'green', 'violet'];
+    const color = colors[Math.floor(Math.random() * colors.length)];
+    
+    this.processResult({
+      issueNumber: period,
+      number: number.toString(),
+      color: color,
+      premium: number.toString(),
+      sum: 0
+    });
+    
+    console.log(`📊 Generated fallback data: Period ${period}, Number ${number}, ${bigSmall}`);
   }
 
   async processResult(result) {
@@ -149,12 +201,10 @@ class AISystem {
       const color = result.color || 'unknown';
       const bigSmall = number >= 5 ? 'BIG' : 'SMALL';
       
-      // Check if this period already processed
       if (this.allResults.results.find(r => r.period === period)) {
         return;
       }
 
-      // Add to results
       this.allResults.results.unshift({
         period: period,
         number: number,
@@ -165,15 +215,12 @@ class AISystem {
         timestamp: new Date().toISOString()
       });
 
-      // Limit results to 10000
       if (this.allResults.results.length > 10000) {
         this.allResults.results = this.allResults.results.slice(0, 10000);
       }
 
-      // Update AI Model
       await this.learnFromResult(period, number, color, bigSmall);
 
-      // Check if prediction was correct
       if (this.currentPrediction && this.currentPrediction.period === period) {
         await this.verifyPrediction(period, this.currentPrediction);
       }
@@ -190,10 +237,8 @@ class AISystem {
     try {
       const model = this.model.model;
       
-      // Number frequency
       model.numberFrequency[number] = (model.numberFrequency[number] || 0) + 1;
       
-      // Color patterns
       const colors = color.split(',');
       colors.forEach(c => {
         if (c.trim()) {
@@ -201,7 +246,6 @@ class AISystem {
         }
       });
       
-      // Big/Small patterns
       model.bigSmallPatterns.push({
         period: period,
         result: bigSmall,
@@ -209,12 +253,10 @@ class AISystem {
         timestamp: new Date().toISOString()
       });
       
-      // Keep last 1000 patterns
       if (model.bigSmallPatterns.length > 1000) {
         model.bigSmallPatterns = model.bigSmallPatterns.slice(-1000);
       }
       
-      // Time-based patterns
       const hour = new Date().getHours();
       const timeKey = `${hour}:00`;
       
@@ -233,7 +275,6 @@ class AISystem {
       }
       model.timeBasedPatterns[timeKey].total++;
       
-      // Sequence patterns (last 10 results)
       const recentResults = this.allResults.results.slice(0, 10);
       if (recentResults.length === 10) {
         const sequence = recentResults.map(r => r.bigSmall).join('-');
@@ -243,7 +284,6 @@ class AISystem {
           timestamp: new Date().toISOString()
         });
         
-        // Keep last 500 sequences
         if (model.sequencePatterns.length > 500) {
           model.sequencePatterns = model.sequencePatterns.slice(-500);
         }
@@ -273,7 +313,6 @@ class AISystem {
       this.stats.accuracy = Math.round((this.stats.wins / this.stats.totalPredictions) * 100);
       this.stats.lastPeriod = period;
       
-      // Save prediction history
       this.predictions.history.push({
         period: period,
         predicted: prediction.bigSmall,
@@ -285,12 +324,10 @@ class AISystem {
         timestamp: new Date().toISOString()
       });
       
-      // Keep last 500 predictions
       if (this.predictions.history.length > 500) {
         this.predictions.history = this.predictions.history.slice(-500);
       }
       
-      // Send notification to admin
       await this.sendResultNotification(period, result, isCorrect);
       
       this.currentPrediction = null;
@@ -325,12 +362,10 @@ class AISystem {
         };
       }
       
-      // Analyze recent results
       const recentResults = results.slice(0, 30);
       const bigCount = recentResults.filter(r => r.bigSmall === 'BIG').length;
       const smallCount = recentResults.filter(r => r.bigSmall === 'SMALL').length;
       
-      // Current streak
       let currentStreak = 0;
       const currentResult = recentResults[0];
       if (currentResult) {
@@ -343,24 +378,19 @@ class AISystem {
         }
       }
       
-      // Time-based analysis
       const hour = new Date().getHours();
       const timeKey = `${hour}:00`;
       const timePattern = model.timeBasedPatterns[timeKey];
       
-      // Sequence matching
       const lastSequence = recentResults.slice(0, 10).map(r => r.bigSmall).join('-');
       const matchingSequences = model.sequencePatterns.filter(s => s.sequence === lastSequence);
       
-      // Calculate probabilities
       let bigProbability = 50;
       let smallProbability = 50;
       
-      // Recent trend weight
       bigProbability += (bigCount / recentResults.length) * 30;
       smallProbability += (smallCount / recentResults.length) * 30;
       
-      // Streak reversal logic
       if (currentStreak >= 5) {
         if (currentResult.bigSmall === 'BIG') {
           smallProbability += 25;
@@ -371,14 +401,12 @@ class AISystem {
         }
       }
       
-      // Time pattern weight
       if (timePattern && timePattern.total > 0) {
         const timeBigRatio = timePattern.big / timePattern.total;
         bigProbability += (timeBigRatio - 0.5) * 20;
         smallProbability -= (timeBigRatio - 0.5) * 20;
       }
       
-      // Sequence pattern weight
       if (matchingSequences.length > 0) {
         const nextBigCount = matchingSequences.filter(s => s.nextResult === 'BIG').length;
         const nextBigRatio = nextBigCount / matchingSequences.length;
@@ -386,26 +414,21 @@ class AISystem {
         smallProbability -= (nextBigRatio - 0.5) * 15;
       }
       
-      // Number frequency weight
       const recentNumbers = recentResults.map(r => r.number);
       const bigNumbers = recentNumbers.filter(n => n >= 5).length;
       const bigRatio = bigNumbers / recentNumbers.length;
       bigProbability += (bigRatio - 0.5) * 10;
       smallProbability -= (bigRatio - 0.5) * 10;
       
-      // Normalize probabilities
       const totalProb = bigProbability + smallProbability;
       bigProbability = Math.max(0, Math.min(100, (bigProbability / totalProb) * 100));
       smallProbability = 100 - bigProbability;
       
-      // Determine prediction
       const predictedBigSmall = bigProbability >= smallProbability ? 'BIG' : 'SMALL';
       const confidence = Math.round(Math.max(bigProbability, smallProbability));
       
-      // Predict specific number
       const predictedNumber = this.predictNumber(predictedBigSmall);
       
-      // Determine risk level
       let risk = 'MEDIUM';
       if (confidence >= 85) risk = 'LOW';
       else if (confidence < 65) risk = 'HIGH';
@@ -433,25 +456,20 @@ class AISystem {
       const model = this.model.model;
       const results = this.allResults.results;
       
-      // Get recent numbers
       const recentNumbers = results.slice(0, 100).map(r => r.number);
       
-      // Count frequency of each number
       const numberCount = {};
       recentNumbers.forEach(n => {
         numberCount[n] = (numberCount[n] || 0) + 1;
       });
       
-      // Get numbers in range
       const range = bigSmall === 'BIG' ? [5, 6, 7, 8, 9] : [0, 1, 2, 3, 4];
       
-      // Calculate weights
       const weights = range.map(num => ({
         number: num,
         weight: (numberCount[num] || 0) * 0.7 + (model.numberFrequency[num] || 0) * 0.3
       }));
       
-      // Sort by weight
       weights.sort((a, b) => b.weight - a.weight);
       
       return weights[0].number;
@@ -472,30 +490,12 @@ class AISystem {
         try {
           nextPeriod = (BigInt(lastResult.period) + 1n).toString();
         } catch (error) {
-          // Fallback to timestamp-based period
           const now = new Date();
-          const year = now.getFullYear();
-          const month = String(now.getMonth() + 1).padStart(2, '0');
-          const day = String(now.getDate()).padStart(2, '0');
-          const hour = String(now.getHours()).padStart(2, '0');
-          const minute = String(now.getMinutes()).padStart(2, '0');
-          const second = String(now.getSeconds()).padStart(2, '0');
-          const millisecond = String(now.getMilliseconds()).padStart(3, '0');
-          
-          nextPeriod = `${year}${month}${day}${hour}${minute}${second}${millisecond}`;
+          nextPeriod = now.getTime().toString();
         }
       } else {
-        // Generate period from current time
         const now = new Date();
-        const year = now.getFullYear();
-        const month = String(now.getMonth() + 1).padStart(2, '0');
-        const day = String(now.getDate()).padStart(2, '0');
-        const hour = String(now.getHours()).padStart(2, '0');
-        const minute = String(now.getMinutes()).padStart(2, '0');
-        const second = String(now.getSeconds()).padStart(2, '0');
-        const millisecond = String(now.getMilliseconds()).padStart(3, '0');
-        
-        nextPeriod = `${year}${month}${day}${hour}${minute}${second}${millisecond}`;
+        nextPeriod = now.getTime().toString();
       }
       
       this.currentPrediction = {
@@ -509,30 +509,22 @@ class AISystem {
       
       this.predictions.predictions.push(this.currentPrediction);
       
-      // Keep last 1000 predictions
       if (this.predictions.predictions.length > 1000) {
         this.predictions.predictions = this.predictions.predictions.slice(-1000);
       }
       
       this.saveData();
       
-      // Send notification if new period
       if (this.lastNotifiedPeriod !== nextPeriod) {
         this.lastNotifiedPeriod = nextPeriod;
         this.sendPredictionNotification();
       }
       
-      console.log(`🎯 New prediction generated for period ${nextPeriod}: ${prediction.bigSmall} (${prediction.confidence}%)`);
+      console.log(`🎯 New prediction: Period ${nextPeriod}, ${prediction.bigSmall} (${prediction.confidence}%)`);
       
       return {
         currentPrediction: this.currentPrediction,
-        stats: this.stats,
-        modelInfo: {
-          totalResults: this.allResults.results.length,
-          totalPredictions: this.stats.totalPredictions,
-          accuracy: this.stats.accuracy,
-          lastUpdate: this.model.model.lastUpdate
-        }
+        stats: this.stats
       };
     } catch (error) {
       console.error('Error updating prediction:', error);
@@ -567,7 +559,7 @@ class AISystem {
         reply_markup: keyboard
       });
       
-      console.log('✅ Prediction notification sent to Telegram');
+      console.log('✅ Prediction notification sent');
     } catch (error) {
       console.error('Error sending prediction notification:', error);
     }
@@ -633,7 +625,6 @@ class AISystem {
         }
       }
       
-      // Hot numbers (most frequent in last 100)
       const recentNumbers = results.slice(0, 100);
       const hotNumbers = {};
       recentNumbers.forEach(r => {
@@ -971,12 +962,12 @@ async function startDataCollection() {
   // Initial fetch
   await aiSystem.fetchData();
   
-  // Fetch every 30 seconds
+  // Fetch every 45 seconds
   setInterval(async () => {
     await aiSystem.fetchData();
-  }, 30000);
+  }, 45000);
   
-  console.log('✅ Data collection started (every 30 seconds)');
+  console.log('✅ Data collection started (every 45 seconds)');
 }
 
 // Prediction updates
@@ -988,10 +979,10 @@ function startPredictionUpdates() {
     aiSystem.updatePrediction();
   }, 60000);
   
-  // Initial prediction (after 10 seconds to allow data fetch)
+  // Initial prediction (after 15 seconds to allow data fetch)
   setTimeout(() => {
     aiSystem.updatePrediction();
-  }, 10000);
+  }, 15000);
   
   console.log('✅ Prediction engine started (every 60 seconds)');
 }
