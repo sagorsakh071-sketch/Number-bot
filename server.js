@@ -9,6 +9,7 @@ const TelegramBot = require('node-telegram-bot-api');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
+const RAILWAY_URL = process.env.RAILWAY_PUBLIC_DOMAIN || `https://web-production-0be19.up.railway.app`;
 
 // Telegram Bot Configuration
 const TELEGRAM_TOKEN = '8831258161:AAGyaXGEsU6k9LGQXdfjZKeY0v4DV2k54dc';
@@ -73,7 +74,6 @@ class AISystem {
     this.lastProcessedPeriod = null;
     this.lastNotifiedPeriod = null;
     this.isFetching = false;
-    this.pendingVerification = null;
   }
 
   saveData() {
@@ -89,7 +89,7 @@ class AISystem {
 
   async fetchData() {
     if (this.isFetching) {
-      console.log('⏳ Already fetching data, skipping...');
+      console.log('⏳ Already fetching, skipping...');
       return null;
     }
     
@@ -98,6 +98,7 @@ class AISystem {
     try {
       console.log('🔄 Fetching data from API...');
       
+      // Try multiple API endpoints
       const urls = [
         'https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json',
         'https://ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json'
@@ -110,9 +111,8 @@ class AISystem {
           response = await axios.get(`${url}?ts=${Date.now()}`, {
             timeout: 10000,
             headers: {
-              'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
               'Accept': 'application/json',
-              'Accept-Language': 'en-US,en;q=0.9',
               'Origin': 'https://ar-lottery01.com',
               'Referer': 'https://ar-lottery01.com/'
             }
@@ -123,14 +123,14 @@ class AISystem {
             break;
           }
         } catch (err) {
-          console.log(`❌ Failed: ${url} - ${err.message}`);
+          console.log(`❌ Failed: ${url}`);
         }
       }
       
       if (response && response.data && response.data.code === 0 && response.data.data) {
         const results = response.data.data.list;
         
-        console.log(`✅ Got ${results.length} results from API`);
+        console.log(`✅ Got ${results.length} results`);
         
         for (const result of results) {
           await this.processResult(result);
@@ -145,32 +145,29 @@ class AISystem {
         
         return results;
       } else {
-        console.log('❌ API error, generating fallback data');
+        console.log('❌ API error, generating fallback');
         this.generateFallbackData();
       }
     } catch (error) {
-      console.error('❌ Error fetching data:', error.message);
+      console.error('❌ Error:', error.message);
       this.generateFallbackData();
-      return null;
     } finally {
       this.isFetching = false;
     }
   }
 
-  // Generate fallback data - simulate WinGo 1Min market
   generateFallbackData() {
     const now = new Date();
     const period = now.getTime().toString();
     
-    // Use time-based pattern for more realistic data
+    // Better fallback - use pattern
     const hour = now.getHours();
     const minute = now.getMinutes();
     const second = now.getSeconds();
     
-    // Pattern: changes every minute
+    // Simulate WinGo 1Min pattern
     const seed = (hour * 3600 + minute * 60 + second);
-    const number = seed % 10; // 0-9
-    
+    const number = Math.floor(seed % 10);
     const bigSmall = number >= 5 ? 'BIG' : 'SMALL';
     const colors = ['red', 'green', 'violet'];
     const color = colors[number % 3];
@@ -183,7 +180,7 @@ class AISystem {
       sum: 0
     });
     
-    console.log(`📊 Generated data: Period ${period}, Number ${number}, ${bigSmall}`);
+    console.log(`📊 Generated: Period ${period}, Number ${number}, ${bigSmall}`);
   }
 
   async processResult(result) {
@@ -193,17 +190,15 @@ class AISystem {
       const color = result.color || 'unknown';
       const bigSmall = number >= 5 ? 'BIG' : 'SMALL';
       
-      // Check if already processed
       if (this.allResults.results.find(r => r.period === period)) {
         return;
       }
 
-      // Check if this period matches pending prediction
+      // Check prediction match
       if (this.currentPrediction && this.currentPrediction.period === period) {
-        await this.verifyPrediction(period, this.currentPrediction);
+        await this.verifyPrediction(period, this.currentPrediction, number, bigSmall);
       }
 
-      // Add to results with win/loss info
       const resultEntry = {
         period: period,
         number: number,
@@ -212,11 +207,11 @@ class AISystem {
         premium: result.premium || '0',
         sum: result.sum || 0,
         timestamp: new Date().toISOString(),
-        prediction: null,
+        prediction: this.currentPrediction?.bigSmall || null,
         isWin: null
       };
 
-      // Attach prediction result if exists
+      // Check if prediction history exists
       const predictionHistory = this.predictions.history.find(h => h.period === period);
       if (predictionHistory) {
         resultEntry.prediction = predictionHistory.predicted;
@@ -233,9 +228,9 @@ class AISystem {
 
       this.lastProcessedPeriod = period;
       
-      console.log(`📊 Processed: Period ${period}, Number ${number}, ${bigSmall}`);
+      console.log(`📊 Processed: ${period}, ${number}, ${bigSmall}`);
     } catch (error) {
-      console.error('Error processing result:', error);
+      console.error('Error processing:', error);
     }
   }
 
@@ -297,17 +292,13 @@ class AISystem {
       
       model.lastUpdate = new Date().toISOString();
     } catch (error) {
-      console.error('Error learning from result:', error);
+      console.error('Error learning:', error);
     }
   }
 
-  async verifyPrediction(period, prediction) {
+  async verifyPrediction(period, prediction, actualNumber, actualBigSmall) {
     try {
-      const result = this.allResults.results.find(r => r.period === period);
-      
-      if (!result) return;
-      
-      const isCorrect = result.bigSmall === prediction.bigSmall;
+      const isCorrect = actualBigSmall === prediction.bigSmall;
       
       this.stats.totalPredictions++;
       if (isCorrect) {
@@ -319,13 +310,12 @@ class AISystem {
       this.stats.accuracy = Math.round((this.stats.wins / this.stats.totalPredictions) * 100);
       this.stats.lastPeriod = period;
       
-      // Save prediction history
       this.predictions.history.push({
         period: period,
         predicted: prediction.bigSmall,
-        actual: result.bigSmall,
+        actual: actualBigSmall,
         predictedNumber: prediction.number,
-        actualNumber: result.number,
+        actualNumber: actualNumber,
         isCorrect: isCorrect,
         confidence: prediction.confidence,
         timestamp: new Date().toISOString()
@@ -336,26 +326,26 @@ class AISystem {
       }
       
       // Send result notification
-      await this.sendResultNotification(period, result, isCorrect, prediction);
+      await this.sendResultNotification(period, actualNumber, actualBigSmall, isCorrect, prediction);
       
       this.currentPrediction = null;
     } catch (error) {
-      console.error('Error verifying prediction:', error);
+      console.error('Error verifying:', error);
     }
   }
 
-  async sendResultNotification(period, result, isCorrect, prediction) {
+  async sendResultNotification(period, actualNumber, actualBigSmall, isCorrect, prediction) {
     try {
-      const emoji = isCorrect ? '✅' : '❌';
+      const statusEmoji = isCorrect ? '✅' : '❌';
       const statusText = isCorrect ? 'WIN 🏆' : 'LOSS 💔';
       
-      const message = `📊 *Result Update*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${period}\`\n🎯 Actual Number: \`${result.number}\`\n📈 Actual Result: ${result.bigSmall === 'BIG' ? '🔴 BIG' : '🟢 SMALL'}\n\n🎯 Predicted: ${prediction.bigSmall === 'BIG' ? '🔴 BIG' : '🟢 SMALL'}\n🔢 Predicted Number: \`${prediction.number}\`\n\n${emoji} *${statusText}*\n━━━━━━━━━━━━━━━━\n📊 Accuracy: ${this.stats.accuracy}%\n🏆 Wins: ${this.stats.wins}\n💔 Losses: ${this.stats.losses}`;
+      const message = `📊 *Result Update*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${period}\`\n🎯 Number: \`${actualNumber}\`\n📈 Result: ${actualBigSmall === 'BIG' ? '🔴 BIG' : '🟢 SMALL'}\n\n🎯 Predicted: ${prediction.bigSmall === 'BIG' ? '🔴 BIG' : '🟢 SMALL'}\n\n${statusEmoji} *${statusText}*\n━━━━━━━━━━━━━━━━\n📊 Accuracy: ${this.stats.accuracy}%\n🏆 Wins: ${this.stats.wins}\n💔 Losses: ${this.stats.losses}`;
       
       await bot.sendMessage(ADMIN_USER_ID, message, {
         parse_mode: 'Markdown'
       });
     } catch (error) {
-      console.error('Error sending notification:', error);
+      console.error('Error sending result:', error);
     }
   }
 
@@ -485,7 +475,6 @@ class AISystem {
       
       return weights[0].number;
     } catch (error) {
-      console.error('Error predicting number:', error);
       return bigSmall === 'BIG' ? 7 : 2;
     }
   }
@@ -500,13 +489,11 @@ class AISystem {
       if (lastResult && lastResult.period) {
         try {
           nextPeriod = (BigInt(lastResult.period) + 1n).toString();
-        } catch (error) {
-          const now = new Date();
-          nextPeriod = now.getTime().toString();
+        } catch {
+          nextPeriod = new Date().getTime().toString();
         }
       } else {
-        const now = new Date();
-        nextPeriod = now.getTime().toString();
+        nextPeriod = new Date().getTime().toString();
       }
       
       this.currentPrediction = {
@@ -531,12 +518,9 @@ class AISystem {
         this.sendPredictionNotification();
       }
       
-      console.log(`🎯 New prediction: Period ${nextPeriod}, ${prediction.bigSmall} (${prediction.confidence}%)`);
+      console.log(`🎯 Prediction: ${prediction.bigSmall} (${prediction.confidence}%)`);
       
-      return {
-        currentPrediction: this.currentPrediction,
-        stats: this.stats
-      };
+      return { currentPrediction: this.currentPrediction, stats: this.stats };
     } catch (error) {
       console.error('Error updating prediction:', error);
       return null;
@@ -553,38 +537,20 @@ class AISystem {
       
       const message = `🎯 *New Prediction*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${pred.period}\`\n${emoji} Signal: *${pred.bigSmall}*\n🔢 Number: \`${pred.number}\`\n📊 Confidence: \`${pred.confidence}%\`\n${riskEmoji} Risk: \`${pred.risk}\`\n━━━━━━━━━━━━━━━━\n🕐 ${new Date().toLocaleTimeString()}`;
       
-      const keyboard = {
-        inline_keyboard: [
-          [
-            { text: '📜 History', callback_data: 'history' },
-            { text: '📊 Analysis', callback_data: 'analysis' }
-          ],
-          [
-            { text: '📈 Stats', callback_data: 'stats' }
-          ]
-        ]
-      };
-      
       await bot.sendMessage(ADMIN_USER_ID, message, {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard
+        parse_mode: 'Markdown'
       });
-      
-      console.log('✅ Prediction notification sent');
     } catch (error) {
-      console.error('Error sending prediction notification:', error);
+      console.error('Error sending prediction:', error);
     }
   }
 
   getHistory(page = 1, pageSize = 10) {
     const results = this.allResults.results;
     const totalPages = Math.ceil(results.length / pageSize);
-    
     page = Math.max(1, Math.min(page, totalPages || 1));
-    
     const startIndex = (page - 1) * pageSize;
     const endIndex = startIndex + pageSize;
-    
     const pageResults = results.slice(startIndex, endIndex);
     
     return {
@@ -603,7 +569,6 @@ class AISystem {
   getAnalysis() {
     try {
       const results = this.allResults.results;
-      
       const bigCount = results.filter(r => r.bigSmall === 'BIG').length;
       const smallCount = results.filter(r => r.bigSmall === 'SMALL').length;
       const total = bigCount + smallCount;
@@ -611,16 +576,6 @@ class AISystem {
       const numberFreq = {};
       results.forEach(r => {
         numberFreq[r.number] = (numberFreq[r.number] || 0) + 1;
-      });
-      
-      const colorFreq = {};
-      results.forEach(r => {
-        const colors = r.color.split(',');
-        colors.forEach(c => {
-          if (c.trim()) {
-            colorFreq[c.trim()] = (colorFreq[c.trim()] || 0) + 1;
-          }
-        });
       });
       
       let currentBigStreak = 0;
@@ -655,17 +610,12 @@ class AISystem {
           smallPercentage: total > 0 ? Math.round((smallCount / total) * 100) : 0
         },
         numberFrequency: numberFreq,
-        colorFrequency: colorFreq,
-        currentStreak: {
-          big: currentBigStreak,
-          small: currentSmallStreak
-        },
+        currentStreak: { big: currentBigStreak, small: currentSmallStreak },
         hotNumbers: sortedHotNumbers,
         totalResults: results.length,
         lastUpdate: this.allResults.lastUpdate
       };
     } catch (error) {
-      console.error('Error getting analysis:', error);
       return null;
     }
   }
@@ -674,78 +624,70 @@ class AISystem {
 // Initialize AI System
 const aiSystem = new AISystem();
 
-// Initialize Telegram Bot
-const bot = new TelegramBot(TELEGRAM_TOKEN, { 
-  polling: true,
-  onlyFirstMatch: true
+// Middleware
+app.use(cors());
+app.use(compression());
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(express.json());
+
+// Create bot with polling disabled initially
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
+
+// Set webhook
+const webhookUrl = `${RAILWAY_URL}/bot${TELEGRAM_TOKEN}`;
+bot.setWebHook(webhookUrl)
+  .then(() => {
+    console.log('✅ Webhook set successfully');
+  })
+  .catch((error) => {
+    console.log('❌ Webhook error, falling back to polling');
+    // Fallback to polling if webhook fails
+    bot.startPolling();
+  });
+
+// Webhook endpoint
+app.post(`/bot${TELEGRAM_TOKEN}`, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
 });
 
-// Telegram Bot Commands
+// Bot commands
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  
-  if (userId !== ADMIN_USER_ID) {
-    await bot.sendMessage(chatId, '❌ You are not authorized to use this bot.');
+  if (msg.from.id !== ADMIN_USER_ID) {
+    await bot.sendMessage(chatId, '❌ Not authorized');
     return;
   }
   
-  const welcomeMessage = `🎯 *Welcome to WinGo AI Prediction Bot*\n\n━━━━━━━━━━━━━━━━\n*Available Commands:*\n\n📊 /prediction - Get current prediction\n📜 /history - View results history\n📈 /analysis - Market analysis\n📊 /stats - Win/Loss statistics\n🔄 /refresh - Refresh data\n❓ /help - Show all commands\n\n━━━━━━━━━━━━━━━━\n*AI System Status:*\n✅ Active\n🧠 Learning continuously\n📡 Auto-updating every minute`;
+  const welcomeMessage = `🎯 *WinGo AI Prediction Bot*\n\n━━━━━━━━━━━━━━━━\n📊 /prediction - Current prediction\n📜 /history - Results history\n📈 /analysis - Market analysis\n📊 /stats - Statistics\n━━━━━━━━━━━━━━━━`;
   
-  const keyboard = {
-    inline_keyboard: [
-      [
-        { text: '🎯 Prediction', callback_data: 'prediction' },
-        { text: '📜 History', callback_data: 'history' }
-      ],
-      [
-        { text: '📈 Analysis', callback_data: 'analysis' },
-        { text: '📊 Stats', callback_data: 'stats' }
-      ]
-    ]
-  };
-  
-  await bot.sendMessage(chatId, welcomeMessage, {
-    parse_mode: 'Markdown',
-    reply_markup: keyboard
-  });
+  await bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
 });
 
 bot.onText(/\/prediction/, async (msg) => {
   const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  
-  if (userId !== ADMIN_USER_ID) {
-    await bot.sendMessage(chatId, '❌ You are not authorized.');
-    return;
-  }
+  if (msg.from.id !== ADMIN_USER_ID) return;
   
   if (aiSystem.currentPrediction) {
     const pred = aiSystem.currentPrediction;
     const emoji = pred.bigSmall === 'BIG' ? '🔴' : '🟢';
-    const riskEmoji = pred.risk === 'LOW' ? '✅' : pred.risk === 'MEDIUM' ? '⚠️' : '❌';
     
-    const message = `🎯 *Current Prediction*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${pred.period}\`\n${emoji} Signal: *${pred.bigSmall}*\n🔢 Number: \`${pred.number}\`\n📊 Confidence: \`${pred.confidence}%\`\n${riskEmoji} Risk: \`${pred.risk}\`\n━━━━━━━━━━━━━━━━\n🕐 ${new Date().toLocaleTimeString()}`;
+    const message = `🎯 *Prediction*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${pred.period}\`\n${emoji} Signal: *${pred.bigSmall}*\n🔢 Number: \`${pred.number}\`\n📊 Confidence: \`${pred.confidence}%\`\n━━━━━━━━━━━━━━━━`;
     
     await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
   } else {
-    await bot.sendMessage(chatId, '⏳ Prediction is being generated... Please wait.');
+    await bot.sendMessage(chatId, '⏳ Generating...');
   }
 });
 
 bot.onText(/\/history/, async (msg) => {
   const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  
-  if (userId !== ADMIN_USER_ID) {
-    await bot.sendMessage(chatId, '❌ You are not authorized.');
-    return;
-  }
+  if (msg.from.id !== ADMIN_USER_ID) return;
   
   const history = aiSystem.getHistory(1, 10);
   
   if (history.results.length === 0) {
-    await bot.sendMessage(chatId, '📜 No history available yet. Data is being collected...');
+    await bot.sendMessage(chatId, '📜 No history yet');
     return;
   }
   
@@ -755,13 +697,10 @@ bot.onText(/\/history/, async (msg) => {
     const emoji = result.bigSmall === 'BIG' ? '🔴' : '🟢';
     let winLossText = '';
     
-    if (result.isWin === true) {
-      winLossText = ' ✅ WIN';
-    } else if (result.isWin === false) {
-      winLossText = ' ❌ LOSS';
-    }
+    if (result.isWin === true) winLossText = ' ✅ WIN';
+    else if (result.isWin === false) winLossText = ' ❌ LOSS';
     
-    message += `${index + 1}. \`${result.period}\`\n   ${emoji} ${result.bigSmall} | Number: ${result.number}${winLossText}\n\n`;
+    message += `${index + 1}. \`${result.period}\`\n   ${emoji} ${result.bigSmall} | ${result.number}${winLossText}\n\n`;
   });
   
   message += `━━━━━━━━━━━━━━━━\n📄 Page 1 of ${history.pagination.totalPages}`;
@@ -771,279 +710,82 @@ bot.onText(/\/history/, async (msg) => {
 
 bot.onText(/\/analysis/, async (msg) => {
   const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  
-  if (userId !== ADMIN_USER_ID) {
-    await bot.sendMessage(chatId, '❌ You are not authorized.');
-    return;
-  }
+  if (msg.from.id !== ADMIN_USER_ID) return;
   
   const analysis = aiSystem.getAnalysis();
   
   if (!analysis) {
-    await bot.sendMessage(chatId, '📊 No analysis available yet. Data is being collected...');
+    await bot.sendMessage(chatId, '📊 No data yet');
     return;
   }
   
   const hotNumbers = analysis.hotNumbers.map(h => `${h.number} (${h.count}x)`).join(', ');
   
-  const message = `📊 *Market Analysis*\n━━━━━━━━━━━━━━━━\n📈 Total Results: \`${analysis.totalResults}\`\n\n🔴 BIG: \`${analysis.bigSmallRatio.big}\` (${analysis.bigSmallRatio.bigPercentage}%)\n🟢 SMALL: \`${analysis.bigSmallRatio.small}\` (${analysis.bigSmallRatio.smallPercentage}%)\n\n🔥 Hot Numbers:\n${hotNumbers}\n\n📊 Current Streak:\n🔴 BIG: \`${analysis.currentStreak.big}\`\n🟢 SMALL: \`${analysis.currentStreak.small}\`\n━━━━━━━━━━━━━━━━\n🕐 ${new Date().toLocaleTimeString()}`;
+  const message = `📊 *Analysis*\n━━━━━━━━━━━━━━━━\n📈 Total: ${analysis.totalResults}\n🔴 BIG: ${analysis.bigSmallRatio.bigPercentage}%\n🟢 SMALL: ${analysis.bigSmallRatio.smallPercentage}%\n🔥 Hot: ${hotNumbers}\n━━━━━━━━━━━━━━━━`;
   
   await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 });
 
 bot.onText(/\/stats/, async (msg) => {
   const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  
-  if (userId !== ADMIN_USER_ID) {
-    await bot.sendMessage(chatId, '❌ You are not authorized.');
-    return;
-  }
+  if (msg.from.id !== ADMIN_USER_ID) return;
   
   const stats = aiSystem.stats;
   
-  const message = `📊 *Statistics*\n━━━━━━━━━━━━━━━━\n🏆 Total Wins: \`${stats.wins}\`\n💔 Total Losses: \`${stats.losses}\`\n📈 Total Predictions: \`${stats.totalPredictions}\`\n🎯 Accuracy: \`${stats.accuracy}%\`\n\n📚 Total Results: \`${aiSystem.allResults.results.length}\`\n🕐 Last Update: \`${aiSystem.allResults.lastUpdate || 'N/A'}\`\n━━━━━━━━━━━━━━━━`;
+  const message = `📊 *Stats*\n━━━━━━━━━━━━━━━━\n🏆 Wins: ${stats.wins}\n💔 Losses: ${stats.losses}\n🎯 Accuracy: ${stats.accuracy}%\n📚 Total: ${aiSystem.allResults.results.length}\n━━━━━━━━━━━━━━━━`;
   
   await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 });
-
-bot.onText(/\/help/, async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  
-  if (userId !== ADMIN_USER_ID) {
-    await bot.sendMessage(chatId, '❌ You are not authorized.');
-    return;
-  }
-  
-  const message = `❓ *Help - Available Commands*\n━━━━━━━━━━━━━━━━\n🎯 /prediction - Get current prediction\n📜 /history - View results history (10 per page)\n📈 /analysis - Market analysis with hot numbers\n📊 /stats - Win/Loss statistics\n🔄 /refresh - Manually refresh data\n❓ /help - Show this help message\n\n*Auto Features:*\n🔔 Auto notification every minute\n📊 Auto result updates\n🧠 AI learning from every result\n━━━━━━━━━━━━━━━━`;
-  
-  await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-});
-
-bot.onText(/\/refresh/, async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  
-  if (userId !== ADMIN_USER_ID) {
-    await bot.sendMessage(chatId, '❌ You are not authorized.');
-    return;
-  }
-  
-  await bot.sendMessage(chatId, '🔄 Refreshing data...');
-  await aiSystem.fetchData();
-  await bot.sendMessage(chatId, '✅ Data refreshed successfully!');
-});
-
-// Handle callback queries
-bot.on('callback_query', async (query) => {
-  const chatId = query.message.chat.id;
-  const userId = query.from.id;
-  const data = query.data;
-  
-  if (userId !== ADMIN_USER_ID) {
-    await bot.answerCallbackQuery(query.id, { text: '❌ Not authorized!' });
-    return;
-  }
-  
-  if (data === 'prediction') {
-    await bot.answerCallbackQuery(query.id);
-    if (aiSystem.currentPrediction) {
-      const pred = aiSystem.currentPrediction;
-      const emoji = pred.bigSmall === 'BIG' ? '🔴' : '🟢';
-      
-      const message = `🎯 *Current Prediction*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${pred.period}\`\n${emoji} Signal: *${pred.bigSmall}*\n🔢 Number: \`${pred.number}\`\n📊 Confidence: \`${pred.confidence}%\`\n━━━━━━━━━━━━━━━━`;
-      
-      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    }
-  } else if (data === 'history') {
-    await bot.answerCallbackQuery(query.id);
-    const history = aiSystem.getHistory(1, 10);
-    
-    let message = '📜 *Recent Results*\n━━━━━━━━━━━━━━━━\n\n';
-    
-    history.results.forEach((result, index) => {
-      const emoji = result.bigSmall === 'BIG' ? '🔴' : '🟢';
-      let winLossText = '';
-      
-      if (result.isWin === true) {
-        winLossText = ' ✅ WIN';
-      } else if (result.isWin === false) {
-        winLossText = ' ❌ LOSS';
-      }
-      
-      message += `${index + 1}. \`${result.period}\`\n   ${emoji} ${result.bigSmall} | Number: ${result.number}${winLossText}\n\n`;
-    });
-    
-    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-  } else if (data === 'analysis') {
-    await bot.answerCallbackQuery(query.id);
-    const analysis = aiSystem.getAnalysis();
-    
-    if (analysis) {
-      const message = `📊 *Market Analysis*\n━━━━━━━━━━━━━━━━\n🔴 BIG: ${analysis.bigSmallRatio.bigPercentage}%\n🟢 SMALL: ${analysis.bigSmallRatio.smallPercentage}%\n📈 Total Results: ${analysis.totalResults}\n━━━━━━━━━━━━━━━━`;
-      
-      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    }
-  } else if (data === 'stats') {
-    await bot.answerCallbackQuery(query.id);
-    const stats = aiSystem.stats;
-    
-    const message = `📊 *Statistics*\n━━━━━━━━━━━━━━━━\n🏆 Wins: ${stats.wins}\n💔 Losses: ${stats.losses}\n🎯 Accuracy: ${stats.accuracy}%\n━━━━━━━━━━━━━━━━`;
-    
-    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-  }
-});
-
-// Middleware
-app.use(cors());
-app.use(compression());
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false
-}));
-app.use(express.json());
-app.use(express.static('public'));
 
 // API Routes
 app.get('/', (req, res) => {
-  res.json({
-    success: true,
-    message: 'WinGo AI Prediction Bot is running!',
-    status: 'active'
-  });
+  res.json({ success: true, message: 'Bot is running!' });
 });
 
 app.get('/api/prediction', (req, res) => {
-  try {
-    res.json({
-      success: true,
-      prediction: aiSystem.currentPrediction,
-      stats: aiSystem.stats
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+  res.json({ success: true, prediction: aiSystem.currentPrediction, stats: aiSystem.stats });
 });
 
 app.get('/api/history', (req, res) => {
-  try {
-    const page = parseInt(req.query.page) || 1;
-    const pageSize = parseInt(req.query.pageSize) || 10;
-    
-    const history = aiSystem.getHistory(page, pageSize);
-    
-    res.json({
-      success: true,
-      data: history
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-app.get('/api/analysis', (req, res) => {
-  try {
-    const analysis = aiSystem.getAnalysis();
-    
-    res.json({
-      success: true,
-      data: analysis
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+  const page = parseInt(req.query.page) || 1;
+  const pageSize = parseInt(req.query.pageSize) || 10;
+  res.json({ success: true, data: aiSystem.getHistory(page, pageSize) });
 });
 
 app.get('/api/stats', (req, res) => {
-  try {
-    res.json({
-      success: true,
-      stats: aiSystem.stats,
-      modelInfo: {
-        totalResults: aiSystem.allResults.results.length,
-        totalPredictions: aiSystem.stats.totalPredictions,
-        accuracy: aiSystem.stats.accuracy,
-        lastUpdate: aiSystem.model.model.lastUpdate
-      }
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+  res.json({ success: true, stats: aiSystem.stats });
 });
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 WinGo AI Prediction Server running on port ${PORT}`);
-  console.log(`📡 API: http://localhost:${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
   
-  // Start data collection
   startDataCollection();
-  
-  // Start prediction updates
   startPredictionUpdates();
 });
 
-// Data collection function
 async function startDataCollection() {
   console.log('📡 Starting data collection...');
-  
-  // Initial fetch
   await aiSystem.fetchData();
-  
-  // Fetch every 45 seconds
   setInterval(async () => {
     await aiSystem.fetchData();
   }, 45000);
-  
-  console.log('✅ Data collection started (every 45 seconds)');
 }
 
-// Prediction updates
 function startPredictionUpdates() {
-  console.log('🤖 Starting AI prediction engine...');
-  
-  // Update prediction every 60 seconds
+  console.log('🤖 Starting prediction engine...');
   setInterval(() => {
     aiSystem.updatePrediction();
   }, 60000);
-  
-  // Initial prediction (after 15 seconds)
   setTimeout(() => {
     aiSystem.updatePrediction();
   }, 15000);
-  
-  console.log('✅ Prediction engine started (every 60 seconds)');
 }
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('👋 Shutting down gracefully...');
   aiSystem.saveData();
-  bot.stopPolling();
   process.exit();
 });
 
-// Error handling
-process.on('unhandledRejection', (error) => {
-  console.error('❌ Unhandled rejection:', error);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught exception:', error);
-});
-
-console.log('✅ System initialized successfully!');
+console.log('✅ System initialized!');
