@@ -1,233 +1,936 @@
-/**
- * Baileys WhatsApp API Server - Multi Session
- * প্রতিটা user এর আলাদা WhatsApp session
- */
-
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-} = require("@whiskeysockets/baileys");
-const express = require("express");
-const pino = require("pino");
-const qrcode = require("qrcode");
-const fs = require("fs");
+const express = require('express');
+const axios = require('axios');
+const fs = require('fs-extra');
+const path = require('path');
+const cors = require('cors');
+const compression = require('compression');
+const helmet = require('helmet');
+const TelegramBot = require('node-telegram-bot-api');
 
 const app = express();
-app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
-const AUTH_BASE = process.env.AUTH_DIR || "./wa_auth";
 
-// ── Sessions Store ─────────────────────────────────────
-// { userId: { sock, isConnected, currentQR, isReconnecting } }
-const sessions = {};
+// Telegram Bot Configuration
+const TELEGRAM_TOKEN = '8831258161:AAGyaXGEsU6k9LGQXdfjZKeY0v4DV2k54dc';
+const ADMIN_USER_ID = 7095358778;
 
-// ── Connect একটা user এর জন্য ─────────────────────────
-async function connectWA(userId) {
-  if (!sessions[userId]) {
-    sessions[userId] = {
-      sock: null,
-      isConnected: false,
-      currentQR: null,
-      isReconnecting: false,
-    };
-  }
+// Initialize Telegram Bot
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-  const session = sessions[userId];
-  if (session.isReconnecting) return;
-  session.isReconnecting = true;
+// Middleware
+app.use(cors());
+app.use(compression());
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
+app.use(express.json());
+app.use(express.static('public'));
 
-  try {
-    const authDir = `${AUTH_BASE}/${userId}`;
-    if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+// API Configuration
+const API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
 
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
-    const { version } = await fetchLatestBaileysVersion();
+// Data storage paths - Railway persistent storage
+const DATA_DIR = path.join(__dirname, 'data');
+const RESULTS_FILE = path.join(DATA_DIR, 'results.json');
+const PREDICTIONS_FILE = path.join(DATA_DIR, 'predictions.json');
+const AI_MODEL_FILE = path.join(DATA_DIR, 'ai_model.json');
+const STATS_FILE = path.join(DATA_DIR, 'stats.json');
 
-    session.sock = makeWASocket({
-      version,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
-      },
-      logger: pino({ level: "silent" }),
-      printQRInTerminal: false,
-      browser: ["Ubuntu", "Chrome", "22.04.4"],
-      generateHighQualityLinkPreview: false,
-      syncFullHistory: false,
-      markOnlineOnConnect: false,
-      connectTimeoutMs: 30000,
-      defaultQueryTimeoutMs: 20000,
-    });
+// Ensure data directory exists
+fs.ensureDirSync(DATA_DIR);
 
-    session.sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
-      if (qr) {
-        session.currentQR = qr;
-        session.isConnected = false;
-        console.log(`📱 [${userId}] QR ready`);
+// Initialize data files
+function initializeFiles() {
+  const files = {
+    [RESULTS_FILE]: { results: [], lastUpdate: null },
+    [PREDICTIONS_FILE]: { predictions: [], history: [] },
+    [AI_MODEL_FILE]: {
+      model: {
+        bigSmallPatterns: [],
+        numberFrequency: {},
+        colorPatterns: {},
+        timeBasedPatterns: {},
+        sequencePatterns: [],
+        weightMatrix: {},
+        learningRate: 0.01,
+        totalPredictions: 0,
+        correctPredictions: 0,
+        lastUpdate: null
       }
+    },
+    [STATS_FILE]: {
+      wins: 0,
+      losses: 0,
+      totalPredictions: 0,
+      accuracy: 0,
+      lastPeriod: null
+    }
+  };
 
-      if (connection === "open") {
-        session.isConnected = true;
-        session.currentQR = null;
-        session.isReconnecting = false;
-        console.log(`✅ [${userId}] WhatsApp Connected!`);
-      }
-
-      if (connection === "close") {
-        session.isConnected = false;
-        session.isReconnecting = false;
-        const code = lastDisconnect?.error?.output?.statusCode;
-        const loggedOut = code === DisconnectReason.loggedOut || code === 401;
-        console.log(`❌ [${userId}] Disconnected (code: ${code})`);
-
-        if (!loggedOut) {
-          setTimeout(() => connectWA(userId), 5000);
-        } else {
-          console.log(`🚫 [${userId}] Logged out — clearing auth`);
-          try {
-            const authDir = `${AUTH_BASE}/${userId}`;
-            fs.rmSync(authDir, { recursive: true, force: true });
-          } catch {}
-          delete sessions[userId];
-        }
-      }
-    });
-
-    session.sock.ev.on("creds.update", saveCreds);
-  } catch (e) {
-    console.error(`connectWA error [${userId}]:`, e.message);
-    session.isReconnecting = false;
-    setTimeout(() => connectWA(userId), 10000);
+  for (const [file, data] of Object.entries(files)) {
+    if (!fs.existsSync(file)) {
+      fs.writeJsonSync(file, data);
+    }
   }
 }
 
-// ── Routes ─────────────────────────────────────────────
+initializeFiles();
 
-// Status check
-app.get("/status", (req, res) => {
-  const { userId } = req.query;
-  if (!userId) return res.status(400).json({ error: "userId required" });
+// AI System Class
+class AISystem {
+  constructor() {
+    this.model = fs.readJsonSync(AI_MODEL_FILE);
+    this.stats = fs.readJsonSync(STATS_FILE);
+    this.allResults = fs.readJsonSync(RESULTS_FILE);
+    this.predictions = fs.readJsonSync(PREDICTIONS_FILE);
+    this.currentPrediction = null;
+    this.lastProcessedPeriod = null;
+    this.lastNotifiedPeriod = null;
+  }
 
-  const session = sessions[userId];
-  res.json({
-    connected: session?.isConnected || false,
-    hasQR: !!(session?.currentQR),
+  saveData() {
+    try {
+      fs.writeJsonSync(AI_MODEL_FILE, this.model);
+      fs.writeJsonSync(STATS_FILE, this.stats);
+      fs.writeJsonSync(RESULTS_FILE, this.allResults);
+      fs.writeJsonSync(PREDICTIONS_FILE, this.predictions);
+    } catch (error) {
+      console.error('Error saving data:', error);
+    }
+  }
+
+  async fetchData() {
+    try {
+      const response = await axios.get(`${API_URL}?ts=${Date.now()}`, {
+        timeout: 10000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'application/json'
+        }
+      });
+
+      if (response.data && response.data.code === 0 && response.data.data) {
+        const results = response.data.data.list;
+        
+        for (const result of results) {
+          await this.processResult(result);
+        }
+
+        this.allResults.lastUpdate = new Date().toISOString();
+        this.saveData();
+        
+        this.updatePrediction();
+        
+        return results;
+      }
+    } catch (error) {
+      console.error('Error fetching data:', error.message);
+      return null;
+    }
+  }
+
+  async processResult(result) {
+    try {
+      const period = result.issueNumber;
+      const number = parseInt(result.number);
+      const color = result.color || 'unknown';
+      const bigSmall = number >= 5 ? 'BIG' : 'SMALL';
+      
+      if (this.allResults.results.find(r => r.period === period)) {
+        return;
+      }
+
+      this.allResults.results.unshift({
+        period: period,
+        number: number,
+        color: color,
+        bigSmall: bigSmall,
+        premium: result.premium || '0',
+        sum: result.sum || 0,
+        timestamp: new Date().toISOString()
+      });
+
+      if (this.allResults.results.length > 10000) {
+        this.allResults.results = this.allResults.results.slice(0, 10000);
+      }
+
+      await this.learnFromResult(period, number, color, bigSmall);
+
+      if (this.currentPrediction && this.currentPrediction.period === period) {
+        await this.verifyPrediction(period, this.currentPrediction);
+      }
+
+      this.lastProcessedPeriod = period;
+    } catch (error) {
+      console.error('Error processing result:', error);
+    }
+  }
+
+  async learnFromResult(period, number, color, bigSmall) {
+    try {
+      const model = this.model.model;
+      
+      model.numberFrequency[number] = (model.numberFrequency[number] || 0) + 1;
+      
+      const colors = color.split(',');
+      colors.forEach(c => {
+        if (c.trim()) {
+          model.colorPatterns[c.trim()] = (model.colorPatterns[c.trim()] || 0) + 1;
+        }
+      });
+      
+      model.bigSmallPatterns.push({
+        period: period,
+        result: bigSmall,
+        number: number,
+        timestamp: new Date().toISOString()
+      });
+      
+      if (model.bigSmallPatterns.length > 1000) {
+        model.bigSmallPatterns = model.bigSmallPatterns.slice(-1000);
+      }
+      
+      const hour = new Date().getHours();
+      const timeKey = `${hour}:00`;
+      
+      if (!model.timeBasedPatterns[timeKey]) {
+        model.timeBasedPatterns[timeKey] = {
+          big: 0,
+          small: 0,
+          total: 0
+        };
+      }
+      
+      if (bigSmall === 'BIG') {
+        model.timeBasedPatterns[timeKey].big++;
+      } else {
+        model.timeBasedPatterns[timeKey].small++;
+      }
+      model.timeBasedPatterns[timeKey].total++;
+      
+      const recentResults = this.allResults.results.slice(0, 10);
+      if (recentResults.length === 10) {
+        const sequence = recentResults.map(r => r.bigSmall).join('-');
+        model.sequencePatterns.push({
+          sequence: sequence,
+          nextResult: bigSmall,
+          timestamp: new Date().toISOString()
+        });
+        
+        if (model.sequencePatterns.length > 500) {
+          model.sequencePatterns = model.sequencePatterns.slice(-500);
+        }
+      }
+      
+      model.lastUpdate = new Date().toISOString();
+    } catch (error) {
+      console.error('Error learning from result:', error);
+    }
+  }
+
+  async verifyPrediction(period, prediction) {
+    try {
+      const result = this.allResults.results.find(r => r.period === period);
+      
+      if (!result) return;
+      
+      const isCorrect = result.bigSmall === prediction.bigSmall;
+      
+      this.stats.totalPredictions++;
+      if (isCorrect) {
+        this.stats.wins++;
+      } else {
+        this.stats.losses++;
+      }
+      
+      this.stats.accuracy = Math.round((this.stats.wins / this.stats.totalPredictions) * 100);
+      this.stats.lastPeriod = period;
+      
+      this.predictions.history.push({
+        period: period,
+        predicted: prediction.bigSmall,
+        actual: result.bigSmall,
+        predictedNumber: prediction.number,
+        actualNumber: result.number,
+        isCorrect: isCorrect,
+        confidence: prediction.confidence,
+        timestamp: new Date().toISOString()
+      });
+      
+      if (this.predictions.history.length > 500) {
+        this.predictions.history = this.predictions.history.slice(-500);
+      }
+      
+      await this.sendResultNotification(period, result, isCorrect);
+      
+      this.currentPrediction = null;
+    } catch (error) {
+      console.error('Error verifying prediction:', error);
+    }
+  }
+
+  async sendResultNotification(period, result, isCorrect) {
+    try {
+      const message = `📊 *Result Update*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${period}\`\n🎯 Number: \`${result.number}\`\n📈 Result: ${result.bigSmall === 'BIG' ? '🔴 BIG' : '🟢 SMALL'}\n✅ Prediction: ${isCorrect ? 'Correct! 🎉' : 'Wrong! ❌'}\n━━━━━━━━━━━━━━━━\n📊 Accuracy: ${this.stats.accuracy}%\n🏆 Wins: ${this.stats.wins}\n💔 Losses: ${this.stats.losses}`;
+      
+      await bot.sendMessage(ADMIN_USER_ID, message, {
+        parse_mode: 'Markdown'
+      });
+    } catch (error) {
+      console.error('Error sending notification:', error);
+    }
+  }
+
+  generatePrediction() {
+    try {
+      const model = this.model.model;
+      const results = this.allResults.results;
+      
+      if (results.length < 10) {
+        return {
+          bigSmall: 'BIG',
+          confidence: 50,
+          number: 5,
+          risk: 'HIGH'
+        };
+      }
+      
+      const recentResults = results.slice(0, 30);
+      const bigCount = recentResults.filter(r => r.bigSmall === 'BIG').length;
+      const smallCount = recentResults.filter(r => r.bigSmall === 'SMALL').length;
+      
+      let currentStreak = 0;
+      const currentResult = recentResults[0];
+      if (currentResult) {
+        for (let i = 0; i < recentResults.length; i++) {
+          if (recentResults[i].bigSmall === currentResult.bigSmall) {
+            currentStreak++;
+          } else {
+            break;
+          }
+        }
+      }
+      
+      const hour = new Date().getHours();
+      const timeKey = `${hour}:00`;
+      const timePattern = model.timeBasedPatterns[timeKey];
+      
+      const lastSequence = recentResults.slice(0, 10).map(r => r.bigSmall).join('-');
+      const matchingSequences = model.sequencePatterns.filter(s => s.sequence === lastSequence);
+      
+      let bigProbability = 50;
+      let smallProbability = 50;
+      
+      bigProbability += (bigCount / recentResults.length) * 30;
+      smallProbability += (smallCount / recentResults.length) * 30;
+      
+      if (currentStreak >= 5) {
+        if (currentResult.bigSmall === 'BIG') {
+          smallProbability += 25;
+          bigProbability -= 25;
+        } else {
+          bigProbability += 25;
+          smallProbability -= 25;
+        }
+      }
+      
+      if (timePattern && timePattern.total > 0) {
+        const timeBigRatio = timePattern.big / timePattern.total;
+        bigProbability += (timeBigRatio - 0.5) * 20;
+        smallProbability -= (timeBigRatio - 0.5) * 20;
+      }
+      
+      if (matchingSequences.length > 0) {
+        const nextBigCount = matchingSequences.filter(s => s.nextResult === 'BIG').length;
+        const nextBigRatio = nextBigCount / matchingSequences.length;
+        bigProbability += (nextBigRatio - 0.5) * 15;
+        smallProbability -= (nextBigRatio - 0.5) * 15;
+      }
+      
+      // Number frequency weight
+      const recentNumbers = recentResults.map(r => r.number);
+      const bigNumbers = recentNumbers.filter(n => n >= 5).length;
+      const bigRatio = bigNumbers / recentNumbers.length;
+      bigProbability += (bigRatio - 0.5) * 10;
+      smallProbability -= (bigRatio - 0.5) * 10;
+      
+      const totalProb = bigProbability + smallProbability;
+      bigProbability = Math.max(0, Math.min(100, (bigProbability / totalProb) * 100));
+      smallProbability = 100 - bigProbability;
+      
+      const predictedBigSmall = bigProbability >= smallProbability ? 'BIG' : 'SMALL';
+      const confidence = Math.round(Math.max(bigProbability, smallProbability));
+      
+      const predictedNumber = this.predictNumber(predictedBigSmall);
+      
+      let risk = 'MEDIUM';
+      if (confidence >= 85) risk = 'LOW';
+      else if (confidence < 65) risk = 'HIGH';
+      
+      return {
+        bigSmall: predictedBigSmall,
+        confidence: confidence,
+        number: predictedNumber,
+        risk: risk,
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('Error generating prediction:', error);
+      return {
+        bigSmall: 'BIG',
+        confidence: 50,
+        number: 5,
+        risk: 'HIGH'
+      };
+    }
+  }
+
+  predictNumber(bigSmall) {
+    try {
+      const model = this.model.model;
+      const results = this.allResults.results;
+      
+      const recentNumbers = results.slice(0, 100).map(r => r.number);
+      
+      const numberCount = {};
+      recentNumbers.forEach(n => {
+        numberCount[n] = (numberCount[n] || 0) + 1;
+      });
+      
+      const range = bigSmall === 'BIG' ? [5, 6, 7, 8, 9] : [0, 1, 2, 3, 4];
+      
+      const weights = range.map(num => ({
+        number: num,
+        weight: (numberCount[num] || 0) * 0.7 + (model.numberFrequency[num] || 0) * 0.3
+      }));
+      
+      weights.sort((a, b) => b.weight - a.weight);
+      
+      return weights[0].number;
+    } catch (error) {
+      console.error('Error predicting number:', error);
+      return bigSmall === 'BIG' ? 7 : 2;
+    }
+  }
+
+  updatePrediction() {
+    try {
+      const prediction = this.generatePrediction();
+      
+      const lastResult = this.allResults.results[0];
+      let nextPeriod;
+      
+      if (lastResult) {
+        nextPeriod = (BigInt(lastResult.period) + 1n).toString();
+      } else {
+        nextPeriod = "Unknown";
+      }
+      
+      this.currentPrediction = {
+        period: nextPeriod,
+        bigSmall: prediction.bigSmall,
+        confidence: prediction.confidence,
+        number: prediction.number,
+        risk: prediction.risk,
+        timestamp: new Date().toISOString()
+      };
+      
+      this.predictions.predictions.push(this.currentPrediction);
+      
+      if (this.predictions.predictions.length > 1000) {
+        this.predictions.predictions = this.predictions.predictions.slice(-1000);
+      }
+      
+      this.saveData();
+      
+      if (this.lastNotifiedPeriod !== nextPeriod) {
+        this.lastNotifiedPeriod = nextPeriod;
+        this.sendPredictionNotification();
+      }
+      
+      return {
+        currentPrediction: this.currentPrediction,
+        stats: this.stats,
+        modelInfo: {
+          totalResults: this.allResults.results.length,
+          totalPredictions: this.stats.totalPredictions,
+          accuracy: this.stats.accuracy,
+          lastUpdate: this.model.model.lastUpdate
+        }
+      };
+    } catch (error) {
+      console.error('Error updating prediction:', error);
+      return null;
+    }
+  }
+
+  async sendPredictionNotification() {
+    try {
+      if (!this.currentPrediction) return;
+      
+      const pred = this.currentPrediction;
+      const emoji = pred.bigSmall === 'BIG' ? '🔴' : '🟢';
+      const riskEmoji = pred.risk === 'LOW' ? '✅' : pred.risk === 'MEDIUM' ? '⚠️' : '❌';
+      
+      const message = `🎯 *New Prediction*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${pred.period}\`\n${emoji} Signal: *${pred.bigSmall}*\n🔢 Number: \`${pred.number}\`\n📊 Confidence: \`${pred.confidence}%\`\n${riskEmoji} Risk: \`${pred.risk}\`\n━━━━━━━━━━━━━━━━\n🕐 ${new Date().toLocaleTimeString()}`;
+      
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: '📜 History', callback_data: 'history' },
+            { text: '📊 Analysis', callback_data: 'analysis' }
+          ],
+          [
+            { text: '📈 Stats', callback_data: 'stats' }
+          ]
+        ]
+      };
+      
+      await bot.sendMessage(ADMIN_USER_ID, message, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
+    } catch (error) {
+      console.error('Error sending prediction notification:', error);
+    }
+  }
+
+  getHistory(page = 1, pageSize = 10) {
+    const results = this.allResults.results;
+    const totalPages = Math.ceil(results.length / pageSize);
+    
+    page = Math.max(1, Math.min(page, totalPages || 1));
+    
+    const startIndex = (page - 1) * pageSize;
+    const endIndex = startIndex + pageSize;
+    
+    const pageResults = results.slice(startIndex, endIndex);
+    
+    return {
+      results: pageResults,
+      pagination: {
+        currentPage: page,
+        pageSize: pageSize,
+        totalResults: results.length,
+        totalPages: totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1
+      }
+    };
+  }
+
+  getAnalysis() {
+    try {
+      const results = this.allResults.results;
+      
+      const bigCount = results.filter(r => r.bigSmall === 'BIG').length;
+      const smallCount = results.filter(r => r.bigSmall === 'SMALL').length;
+      const total = bigCount + smallCount;
+      
+      const numberFreq = {};
+      results.forEach(r => {
+        numberFreq[r.number] = (numberFreq[r.number] || 0) + 1;
+      });
+      
+      const colorFreq = {};
+      results.forEach(r => {
+        const colors = r.color.split(',');
+        colors.forEach(c => {
+          if (c.trim()) {
+            colorFreq[c.trim()] = (colorFreq[c.trim()] || 0) + 1;
+          }
+        });
+      });
+      
+      let currentBigStreak = 0;
+      let currentSmallStreak = 0;
+      
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].bigSmall === 'BIG' && currentSmallStreak === 0) {
+          currentBigStreak++;
+        } else if (results[i].bigSmall === 'SMALL' && currentBigStreak === 0) {
+          currentSmallStreak++;
+        } else {
+          break;
+        }
+      }
+      
+      const recentNumbers = results.slice(0, 100);
+      const hotNumbers = {};
+      recentNumbers.forEach(r => {
+        hotNumbers[r.number] = (hotNumbers[r.number] || 0) + 1;
+      });
+      
+      const sortedHotNumbers = Object.entries(hotNumbers)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([num, count]) => ({ number: parseInt(num), count }));
+      
+      return {
+        bigSmallRatio: {
+          big: bigCount,
+          small: smallCount,
+          bigPercentage: total > 0 ? Math.round((bigCount / total) * 100) : 0,
+          smallPercentage: total > 0 ? Math.round((smallCount / total) * 100) : 0
+        },
+        numberFrequency: numberFreq,
+        colorFrequency: colorFreq,
+        currentStreak: {
+          big: currentBigStreak,
+          small: currentSmallStreak
+        },
+        hotNumbers: sortedHotNumbers,
+        totalResults: results.length,
+        lastUpdate: this.allResults.lastUpdate
+      };
+    } catch (error) {
+      console.error('Error getting analysis:', error);
+      return null;
+    }
+  }
+}
+
+// Initialize AI System
+const aiSystem = new AISystem();
+
+// Telegram Bot Commands
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  
+  if (userId !== ADMIN_USER_ID) {
+    await bot.sendMessage(chatId, '❌ You are not authorized to use this bot.');
+    return;
+  }
+  
+  const welcomeMessage = `🎯 *Welcome to WinGo AI Prediction Bot*\n\n━━━━━━━━━━━━━━━━\n*Available Commands:*\n\n📊 /prediction - Get current prediction\n📜 /history - View results history\n📈 /analysis - Market analysis\n📊 /stats - Win/Loss statistics\n❓ /help - Show all commands\n\n━━━━━━━━━━━━━━━━\n*AI System Status:*\n✅ Active\n🧠 Learning continuously\n📡 Auto-updating every minute`;
+  
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: '🎯 Prediction', callback_data: 'prediction' },
+        { text: '📜 History', callback_data: 'history' }
+      ],
+      [
+        { text: '📈 Analysis', callback_data: 'analysis' },
+        { text: '📊 Stats', callback_data: 'stats' }
+      ]
+    ]
+  };
+  
+  await bot.sendMessage(chatId, welcomeMessage, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard
   });
 });
 
-// Session start
-app.post("/start", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: "userId required" });
-
-  if (!sessions[userId] || !sessions[userId].sock) {
-    await connectWA(userId);
+bot.onText(/\/prediction/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  
+  if (userId !== ADMIN_USER_ID) {
+    await bot.sendMessage(chatId, '❌ You are not authorized.');
+    return;
   }
-
-  res.json({ started: true });
-});
-
-// QR Code
-app.get("/qr", async (req, res) => {
-  const { userId } = req.query;
-  if (!userId) return res.status(400).json({ error: "userId required" });
-
-  const session = sessions[userId];
-  if (!session) return res.json({ waiting: true, message: "Session শুরু হয়নি" });
-  if (session.isConnected) return res.json({ connected: true });
-  if (!session.currentQR) return res.json({ waiting: true, message: "QR ready হয়নি" });
-
-  try {
-    const qrImage = await qrcode.toDataURL(session.currentQR);
-    res.json({ qr: qrImage, raw: session.currentQR });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+  
+  if (aiSystem.currentPrediction) {
+    const pred = aiSystem.currentPrediction;
+    const emoji = pred.bigSmall === 'BIG' ? '🔴' : '🟢';
+    const riskEmoji = pred.risk === 'LOW' ? '✅' : pred.risk === 'MEDIUM' ? '⚠️' : '❌';
+    
+    const message = `🎯 *Current Prediction*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${pred.period}\`\n${emoji} Signal: *${pred.bigSmall}*\n🔢 Number: \`${pred.number}\`\n📊 Confidence: \`${pred.confidence}%\`\n${riskEmoji} Risk: \`${pred.risk}\`\n━━━━━━━━━━━━━━━━\n🕐 ${new Date().toLocaleTimeString()}`;
+    
+    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+  } else {
+    await bot.sendMessage(chatId, '⏳ Prediction is being generated...');
   }
 });
 
-// Pairing Code
-app.post("/pair", async (req, res) => {
-  const { phone, userId } = req.body;
-  if (!phone || !userId) return res.status(400).json({ error: "phone and userId required" });
+bot.onText(/\/history/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  
+  if (userId !== ADMIN_USER_ID) {
+    await bot.sendMessage(chatId, '❌ You are not authorized.');
+    return;
+  }
+  
+  const history = aiSystem.getHistory(1, 10);
+  
+  if (history.results.length === 0) {
+    await bot.sendMessage(chatId, '📜 No history available yet.');
+    return;
+  }
+  
+  let message = '📜 *Recent Results*\n━━━━━━━━━━━━━━━━\n\n';
+  
+  history.results.forEach((result, index) => {
+    const emoji = result.bigSmall === 'BIG' ? '🔴' : '🟢';
+    message += `${index + 1}. \`${result.period}\`\n   ${emoji} ${result.bigSmall} | Number: ${result.number}\n\n`;
+  });
+  
+  message += `━━━━━━━━━━━━━━━━\n📄 Page 1 of ${history.pagination.totalPages}`;
+  
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: '◀️ আগে', callback_data: 'history_1_prev' },
+        { text: 'পরে ▶️', callback_data: 'history_2_next' }
+      ]
+    ]
+  };
+  
+  await bot.sendMessage(chatId, message, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard
+  });
+});
 
-  const session = sessions[userId];
-  if (!session) return res.status(503).json({ error: "Session নেই, আগে /start করো" });
-  if (session.isConnected) return res.json({ connected: true });
-  if (!session.sock) return res.status(503).json({ error: "Socket ready নয়" });
+bot.onText(/\/analysis/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  
+  if (userId !== ADMIN_USER_ID) {
+    await bot.sendMessage(chatId, '❌ You are not authorized.');
+    return;
+  }
+  
+  const analysis = aiSystem.getAnalysis();
+  
+  if (!analysis) {
+    await bot.sendMessage(chatId, '📊 No analysis available yet.');
+    return;
+  }
+  
+  const hotNumbers = analysis.hotNumbers.map(h => `${h.number} (${h.count}x)`).join(', ');
+  
+  const message = `📊 *Market Analysis*\n━━━━━━━━━━━━━━━━\n📈 Total Results: \`${analysis.totalResults}\`\n\n🔴 BIG: \`${analysis.bigSmallRatio.big}\` (${analysis.bigSmallRatio.bigPercentage}%)\n🟢 SMALL: \`${analysis.bigSmallRatio.small}\` (${analysis.bigSmallRatio.smallPercentage}%)\n\n🔥 Hot Numbers:\n${hotNumbers}\n\n📊 Current Streak:\n🔴 BIG: \`${analysis.currentStreak.big}\`\n🟢 SMALL: \`${analysis.currentStreak.small}\`\n━━━━━━━━━━━━━━━━\n🕐 ${new Date().toLocaleTimeString()}`;
+  
+  await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+});
 
-  try {
-    const digits = phone.replace(/\D/g, "");
-    const code = await session.sock.requestPairingCode(digits);
-    console.log(`🔑 [${userId}] Pairing code: ${code}`);
-    res.json({ code });
-  } catch (e) {
-    console.error(`Pair error [${userId}]:`, e.message);
-    res.status(500).json({ error: e.message || "Pairing code পাওয়া যায়নি" });
+bot.onText(/\/stats/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  
+  if (userId !== ADMIN_USER_ID) {
+    await bot.sendMessage(chatId, '❌ You are not authorized.');
+    return;
+  }
+  
+  const stats = aiSystem.stats;
+  
+  const message = `📊 *Statistics*\n━━━━━━━━━━━━━━━━\n🏆 Total Wins: \`${stats.wins}\`\n💔 Total Losses: \`${stats.losses}\`\n📈 Total Predictions: \`${stats.totalPredictions}\`\n🎯 Accuracy: \`${stats.accuracy}%\`\n\n📚 Total Results: \`${aiSystem.allResults.results.length}\`\n🕐 Last Update: \`${aiSystem.allResults.lastUpdate || 'N/A'}\`\n━━━━━━━━━━━━━━━━`;
+  
+  await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+});
+
+bot.onText(/\/help/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  
+  if (userId !== ADMIN_USER_ID) {
+    await bot.sendMessage(chatId, '❌ You are not authorized.');
+    return;
+  }
+  
+  const message = `❓ *Help - Available Commands*\n━━━━━━━━━━━━━━━━\n🎯 /prediction - Get current prediction\n📜 /history - View results history (10 per page)\n📈 /analysis - Market analysis with hot numbers\n📊 /stats - Win/Loss statistics\n🔄 /refresh - Manually refresh data\n❓ /help - Show this help message\n\n*Auto Features:*\n🔔 Auto notification every minute\n📊 Auto result updates\n🧠 AI learning from every result\n━━━━━━━━━━━━━━━━`;
+  
+  await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+});
+
+bot.onText(/\/refresh/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  
+  if (userId !== ADMIN_USER_ID) {
+    await bot.sendMessage(chatId, '❌ You are not authorized.');
+    return;
+  }
+  
+  await bot.sendMessage(chatId, '🔄 Refreshing data...');
+  await aiSystem.fetchData();
+  await bot.sendMessage(chatId, '✅ Data refreshed successfully!');
+});
+
+// Handle callback queries
+bot.on('callback_query', async (query) => {
+  const chatId = query.message.chat.id;
+  const userId = query.from.id;
+  const data = query.data;
+  
+  if (userId !== ADMIN_USER_ID) {
+    await bot.answerCallbackQuery(query.id, { text: '❌ Not authorized!' });
+    return;
+  }
+  
+  if (data === 'prediction') {
+    await bot.answerCallbackQuery(query.id);
+    if (aiSystem.currentPrediction) {
+      const pred = aiSystem.currentPrediction;
+      const emoji = pred.bigSmall === 'BIG' ? '🔴' : '🟢';
+      
+      const message = `🎯 *Current Prediction*\n━━━━━━━━━━━━━━━━\n📌 Period: \`${pred.period}\`\n${emoji} Signal: *${pred.bigSmall}*\n🔢 Number: \`${pred.number}\`\n📊 Confidence: \`${pred.confidence}%\`\n━━━━━━━━━━━━━━━━`;
+      
+      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    }
+  } else if (data === 'history') {
+    await bot.answerCallbackQuery(query.id);
+    const history = aiSystem.getHistory(1, 10);
+    
+    let message = '📜 *Recent Results*\n━━━━━━━━━━━━━━━━\n\n';
+    
+    history.results.forEach((result, index) => {
+      const emoji = result.bigSmall === 'BIG' ? '🔴' : '🟢';
+      message += `${index + 1}. \`${result.period}\`\n   ${emoji} ${result.bigSmall} | Number: ${result.number}\n\n`;
+    });
+    
+    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+  } else if (data === 'analysis') {
+    await bot.answerCallbackQuery(query.id);
+    const analysis = aiSystem.getAnalysis();
+    
+    if (analysis) {
+      const message = `📊 *Market Analysis*\n━━━━━━━━━━━━━━━━\n🔴 BIG: ${analysis.bigSmallRatio.bigPercentage}%\n🟢 SMALL: ${analysis.bigSmallRatio.smallPercentage}%\n📈 Total Results: ${analysis.totalResults}\n━━━━━━━━━━━━━━━━`;
+      
+      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    }
+  } else if (data === 'stats') {
+    await bot.answerCallbackQuery(query.id);
+    const stats = aiSystem.stats;
+    
+    const message = `📊 *Statistics*\n━━━━━━━━━━━━━━━━\n🏆 Wins: ${stats.wins}\n💔 Losses: ${stats.losses}\n🎯 Accuracy: ${stats.accuracy}%\n━━━━━━━━━━━━━━━━`;
+    
+    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
   }
 });
 
-// WA Check
-app.post("/check", async (req, res) => {
-  const { numbers, userId } = req.body;
-  if (!userId) return res.status(400).json({ error: "userId required" });
+// API Routes
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'WinGo AI Prediction Bot is running!',
+    bot: '@YourBotUsername'
+  });
+});
 
-  const session = sessions[userId];
-  if (!session?.isConnected || !session?.sock) {
-    return res.status(503).json({ error: "Not connected" });
-  }
-
-  if (!numbers || !Array.isArray(numbers) || numbers.length === 0) {
-    return res.status(400).json({ error: "numbers array required" });
-  }
-
-  const results = {};
-  for (const n of numbers) results[n] = false;
-
+app.get('/api/prediction', (req, res) => {
   try {
-    const cleaned = numbers.map((n) => n.replace(/\D/g, ""));
-    const waResults = await session.sock.onWhatsApp(...cleaned);
+    res.json({
+      success: true,
+      prediction: aiSystem.currentPrediction,
+      stats: aiSystem.stats
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
-    if (Array.isArray(waResults)) {
-      for (const r of waResults) {
-        const num = r.jid.replace(/@s\.whatsapp\.net$/, "");
-        const orig = numbers.find((n) => n.replace(/\D/g, "") === num);
-        if (orig !== undefined) results[orig] = r.exists === true;
+app.get('/api/history', (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const pageSize = parseInt(req.query.pageSize) || 10;
+    
+    const history = aiSystem.getHistory(page, pageSize);
+    
+    res.json({
+      success: true,
+      data: history
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.get('/api/analysis', (req, res) => {
+  try {
+    const analysis = aiSystem.getAnalysis();
+    
+    res.json({
+      success: true,
+      data: analysis
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.get('/api/stats', (req, res) => {
+  try {
+    res.json({
+      success: true,
+      stats: aiSystem.stats,
+      modelInfo: {
+        totalResults: aiSystem.allResults.results.length,
+        totalPredictions: aiSystem.stats.totalPredictions,
+        accuracy: aiSystem.stats.accuracy,
+        lastUpdate: aiSystem.model.model.lastUpdate
       }
-    }
-
-    res.json({ results });
-  } catch (e) {
-    console.error(`Check error [${userId}]:`, e.message);
-    res.status(500).json({ error: e.message });
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
-// Disconnect
-app.post("/disconnect", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: "userId required" });
-
-  const session = sessions[userId];
-  try {
-    if (session?.sock) {
-      await session.sock.logout();
-    }
-  } catch {}
-
-  try {
-    const authDir = `${AUTH_BASE}/${userId}`;
-    fs.rmSync(authDir, { recursive: true, force: true });
-  } catch {}
-
-  delete sessions[userId];
-  res.json({ success: true });
-});
-
-// ── Start ──────────────────────────────────────────────
+// Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Baileys Multi-Session Server — Port: ${PORT}`);
+  console.log(`🚀 WinGo AI Prediction Server running on port ${PORT}`);
+  console.log(`🤖 Telegram Bot started!`);
+  
+  // Start data collection
+  startDataCollection();
+  
+  // Start prediction updates
+  startPredictionUpdates();
 });
+
+// Data collection function
+async function startDataCollection() {
+  console.log('📡 Starting data collection...');
+  
+  // Initial fetch
+  await aiSystem.fetchData();
+  
+  // Fetch every 30 seconds
+  setInterval(async () => {
+    await aiSystem.fetchData();
+  }, 30000);
+}
+
+// Prediction updates
+function startPredictionUpdates() {
+  console.log('🤖 Starting AI prediction engine...');
+  
+  // Update prediction every 60 seconds
+  setInterval(() => {
+    aiSystem.updatePrediction();
+  }, 60000);
+  
+  // Initial prediction
+  setTimeout(() => {
+    aiSystem.updatePrediction();
+  }, 5000);
+}
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('👋 Shutting down gracefully...');
+  aiSystem.saveData();
+  bot.stopPolling();
+  process.exit();
+});
+
+console.log('✅ System initialized successfully!');
