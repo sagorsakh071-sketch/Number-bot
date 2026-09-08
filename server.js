@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 // Telegram Bot Configuration
-const TELEGRAM_TOKEN = '8831258161:AAGyaXGEsU6k9LGQXdfjZKeY0v4DV2k54dc';
+const TELEGRAM_TOKEN = '883125ZKeY0v4DV2k54dc';
 const ADMIN_USER_ID = 7095358778;
 
 // Initialize Telegram Bot
