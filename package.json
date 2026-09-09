@@ -1,21 +1,18 @@
 {
-  "name": "wingo-ai-prediction",
-  "version": "5.0.0",
-  "description": "WinGo 1Min AI Prediction System with Telegram Bot",
-  "main": "server.js",
+  "name": "wingo-bot",
+  "version": "1.0.0",
+  "description": "WinGo AI Prediction Telegram Bot",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
     "axios": "^1.6.0",
-    "fs-extra": "^11.1.1",
-    "cors": "^2.8.5",
-    "compression": "^1.7.4",
-    "helmet": "^7.0.0",
-    "node-telegram-bot-api": "^0.64.0"
+    "express": "^4.18.0",
+    "fs-extra": "^11.1.0",
+    "node-telegram-bot-api": "^0.61.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=16.0.0"
   }
 }
